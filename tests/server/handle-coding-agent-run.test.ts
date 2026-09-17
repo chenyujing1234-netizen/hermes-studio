@@ -14,36 +14,49 @@ const getSessionMock = vi.hoisted(() => vi.fn())
 const updateSessionMock = vi.hoisted(() => vi.fn())
 const handleCodingAgentSessionCommandMock = vi.hoisted(() => vi.fn(async () => undefined))
 const parseCodingAgentSessionCommandMock = vi.hoisted(() => vi.fn())
+const resolveAuthorizedProviderRuntimeCredentialsMock = vi.hoisted(() => vi.fn())
 
-vi.mock('../../packages/server/src/services/coding-agents/runtime/run-manager', () => ({
+vi.mock('../../packages/server/src/modules/coding-agents/services/runtime/run-manager', () => ({
   codingAgentRunManager: managerMock,
 }))
 
-vi.mock('../../packages/server/src/services/coding-agents', () => ({
+vi.mock('../../packages/server/src/bootstrap/coding-agents', () => ({
   startCodingAgentRun: startCodingAgentRunMock,
   sendCodingAgentRunInput: sendCodingAgentRunInputMock,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/run-chat/model-run-prompt', () => ({
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/model-run-prompt', () => ({
   writeModelRunProfileToken: writeModelRunProfileTokenMock,
 }))
 
-vi.mock('../../packages/server/src/lib/llm-prompt', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/runs/prompt', () => ({
   getSystemPrompt: getSystemPromptMock,
 }))
 
-vi.mock('../../packages/server/src/db/hermes/session-store', () => ({
+vi.mock('../../packages/server/src/modules/studio/repositories/session-store', () => ({
   getSession: getSessionMock,
   updateSession: updateSessionMock,
 }))
 
-vi.mock('../../packages/server/src/services/logger', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/logging', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
-vi.mock('../../packages/server/src/services/coding-agents/session-command', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/authorized-provider-runtime', () => ({
+  resolveAuthorizedProviderRuntimeCredentials: resolveAuthorizedProviderRuntimeCredentialsMock,
+}))
+
+vi.mock('../../packages/server/src/modules/coding-agents/services/session-command', () => ({
   handleCodingAgentSessionCommand: handleCodingAgentSessionCommandMock,
   parseCodingAgentSessionCommand: parseCodingAgentSessionCommandMock,
+}))
+
+vi.mock('../../packages/server/src/modules/studio/public/chat-agent-runtime', () => ({
+  chatCodingAgentRunManager: managerMock,
+  startChatCodingAgentRun: startCodingAgentRunMock,
+  sendChatCodingAgentRunInput: sendCodingAgentRunInputMock,
+  handleChatCodingAgentSessionCommand: handleCodingAgentSessionCommandMock,
+  parseChatCodingAgentSessionCommand: parseCodingAgentSessionCommandMock,
 }))
 
 describe('handleCodingAgentRun', () => {
@@ -54,6 +67,69 @@ describe('handleCodingAgentRun', () => {
     writeModelRunProfileTokenMock.mockResolvedValue(undefined)
     getSystemPromptMock.mockReturnValue('system prompt')
     parseCodingAgentSessionCommandMock.mockReturnValue(null)
+    resolveAuthorizedProviderRuntimeCredentialsMock.mockResolvedValue({
+      apiKey: 'studio-claude-oauth-access-token',
+    })
+  })
+
+  it('runs global Claude Code without requiring Studio OAuth credentials', async () => {
+    resolveAuthorizedProviderRuntimeCredentialsMock.mockRejectedValue(new Error('Studio OAuth is not configured'))
+    managerMock.runIdForSession.mockReturnValue('agent-session-1')
+    managerMock.isSessionLaunchCompatible.mockReturnValue(true)
+    sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'agent-session-1' })
+
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
+    const state = {
+      messages: [],
+      isWorking: false,
+      isAborting: false,
+      events: [],
+      queue: [],
+    }
+    const sessionMap = new Map([['session-1', state]])
+    const socket = {
+      join: vi.fn(),
+      emit: vi.fn(),
+    }
+
+    await handleCodingAgentRun({} as any, socket as any, {
+      session_id: 'session-1',
+      input: 'hello claude',
+      coding_agent_id: 'claude-code',
+      mode: 'global',
+    }, 'default', sessionMap as any)
+
+    expect(resolveAuthorizedProviderRuntimeCredentialsMock).not.toHaveBeenCalled()
+    expect(sendCodingAgentRunInputMock).toHaveBeenCalledWith(
+      'session-1',
+      'hello claude',
+      'system prompt',
+    )
+  })
+
+  it('sends a fresh task context on each turn while storing the original user message', async () => {
+    managerMock.runIdForSession.mockReturnValue('reused-runtime')
+    managerMock.isSessionLaunchCompatible.mockReturnValue(true)
+    sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'reused-runtime' })
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
+    const state = { messages: [], isWorking: false, events: [], queue: [] }
+    const sessions = new Map([['session-1', state]])
+    const socket = { join: vi.fn(), emit: vi.fn() }
+    for (const context of ['first-turn', 'second-turn']) {
+      await handleCodingAgentRun({} as any, socket as any, {
+        session_id: 'session-1', coding_agent_id: 'codex', mode: 'global', input: 'Show a task card', task_plan_context_id: context, interaction_context_id: context,
+      }, 'default', sessions as any)
+    }
+    const calls = sendCodingAgentRunInputMock.mock.calls
+    expect(calls[0][1]).toContain('context_id="first-turn"')
+    expect(calls[1][1]).toContain('context_id="second-turn"')
+    expect(calls[1][1]).not.toContain('first-turn')
+    for (const args of calls) {
+      expect(args[1]).toContain('ekko_studio_clarify')
+      expect(args[1]).toContain('<studio_interaction_context>')
+      expect(args[2]).not.toContain('context_id=')
+      expect(args[4]).toBe('Show a task card')
+    }
   })
 
   it('restarts an existing coding-agent runner when the requested launch mode changes', async () => {
@@ -62,7 +138,7 @@ describe('handleCodingAgentRun', () => {
     startCodingAgentRunMock.mockResolvedValue({ agentSessionId: 'agent-session-2' })
     sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'agent-session-2' })
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -81,6 +157,7 @@ describe('handleCodingAgentRun', () => {
       input: 'use global codex',
       coding_agent_id: 'codex',
       mode: 'global',
+      push_enabled: true,
     }, 'default', sessionMap as any)
 
     expect(managerMock.isSessionLaunchCompatible).toHaveBeenCalledWith('session-1', {
@@ -97,6 +174,7 @@ describe('handleCodingAgentRun', () => {
     }), state)
     expect(startCodingAgentRunMock.mock.calls[0][1]).not.toHaveProperty('groupRuntimeScope')
     expect(sendCodingAgentRunInputMock).toHaveBeenCalledWith('session-1', 'use global codex', 'system prompt')
+    expect(updateSessionMock).toHaveBeenCalledWith('session-1', { push_enabled: 1 })
   })
 
   it('restarts an existing scoped runner when the stored session model changed even if the socket payload omits it', async () => {
@@ -112,7 +190,7 @@ describe('handleCodingAgentRun', () => {
     startCodingAgentRunMock.mockResolvedValue({ agentSessionId: 'agent-session-2' })
     sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'agent-session-2' })
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -154,7 +232,7 @@ describe('handleCodingAgentRun', () => {
     startCodingAgentRunMock.mockResolvedValue({ agentSessionId: 'agent-session-1' })
     sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'agent-session-1' })
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -191,7 +269,7 @@ describe('handleCodingAgentRun', () => {
     startCodingAgentRunMock.mockResolvedValue({ agentSessionId: 'agent-session-1' })
     sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'agent-session-1' })
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -220,7 +298,7 @@ describe('handleCodingAgentRun', () => {
     startCodingAgentRunMock.mockResolvedValue({ agentSessionId: 'agent-session-1' })
     sendCodingAgentRunInputMock.mockResolvedValue({ runId: 'agent-session-1' })
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -274,7 +352,7 @@ describe('handleCodingAgentRun', () => {
       end_reason: 'complete',
     })
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -308,7 +386,7 @@ describe('handleCodingAgentRun', () => {
     managerMock.isSessionProcessing.mockReturnValue(false)
     sendCodingAgentRunInputMock.mockRejectedValue(new Error('send failed'))
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -349,11 +427,11 @@ describe('handleCodingAgentRun', () => {
     writeModelRunProfileTokenMock.mockResolvedValue(undefined)
     getSystemPromptMock.mockReturnValue([
       'system prompt',
-      'Hermes Studio MCP usage: call hermes_studio_api_openapi_get before calling unfamiliar Web UI endpoints.',
-      'Use hermes_studio_api_request with method, relative path, and JSON body/query fields.',
+      'Ekko Studio MCP usage: call ekko_studio_api_openapi_get before calling unfamiliar Web UI endpoints.',
+      'Use ekko_studio_api_request with method, relative path, and JSON body/query fields.',
     ].join('\n'))
 
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,
@@ -381,10 +459,10 @@ describe('handleCodingAgentRun', () => {
     expect(sendCodingAgentRunInputMock).toHaveBeenCalledWith(
       'session-1',
       'hello codex',
-      expect.stringContaining('system prompt\nHermes Studio MCP usage'),
+      expect.stringContaining('system prompt\nEkko Studio MCP usage'),
     )
     const prompt = sendCodingAgentRunInputMock.mock.calls.at(-1)?.[2]
-    expect(prompt).toContain('hermes_studio_api_request')
+    expect(prompt).toContain('ekko_studio_api_request')
     expect(prompt).not.toContain('run-token')
     expect(prompt).not.toContain('[Current Hermes profile:')
     expect(prompt).not.toContain('Current Hermes Web UI model run token')
@@ -399,7 +477,7 @@ describe('handleCodingAgentRun', () => {
       rawName: 'compact',
       args: '',
     })
-    const { handleCodingAgentRun } = await import('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run')
+    const { handleCodingAgentRun } = await import('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run')
     const state = {
       messages: [],
       isWorking: false,

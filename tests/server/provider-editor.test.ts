@@ -28,7 +28,8 @@ function readYaml(path: string): any {
 }
 
 async function loadEditor() {
-  return import('../../packages/server/src/services/hermes/provider-editor')
+  await import('../../packages/server/src/bootstrap/agent-profile-adapter')
+  return import('../../packages/server/src/modules/hermes/services/providers/provider-editor')
 }
 
 beforeEach(() => {
@@ -39,7 +40,7 @@ beforeEach(() => {
   db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys=ON')
   vi.resetModules()
-  vi.doMock('../../packages/server/src/db/index', () => ({
+  vi.doMock('../../packages/server/src/modules/studio/infrastructure/database/index', () => ({
     getDb: () => db,
     getStoragePath: () => ':memory:',
   }))
@@ -47,7 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
-  vi.doUnmock('../../packages/server/src/db/index')
+  vi.doUnmock('../../packages/server/src/modules/studio/infrastructure/database/index')
   vi.resetModules()
   db?.close()
   db = null
@@ -60,6 +61,19 @@ afterEach(() => {
 })
 
 describe('provider editor service', () => {
+  it('keeps the OpenCode probe affinity header across same-origin redirects', async () => {
+    const { fetchProviderCatalogForTest } = await loadEditor()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 307, headers: { location: '/zen/go/v1/models/' } }))
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'glm-5' }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await fetchProviderCatalogForTest('https://opencode.ai/zen/go/v1', 'test-key')).toEqual(['glm-5'])
+    const headers = fetchMock.mock.calls.map(([, init]) => new Headers(init.headers))
+    expect(headers[0].get('x-opencode-session')).toMatch(/^[a-f0-9]{64}$/)
+    expect(headers[1].get('x-opencode-session')).toBe(headers[0].get('x-opencode-session'))
+    expect(headers[1].get('authorization')).toBe('Bearer test-key')
+  })
+
   it('returns capability metadata without exposing the stored credential', async () => {
     const storedCredential = ['stored', 'credential'].join('-')
     writeProfile('research', [

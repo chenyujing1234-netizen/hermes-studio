@@ -4,8 +4,8 @@ import { NButton, NInput, NSelect, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSpeech, type MimoTtsOptions, type OpenaiTtsOptions } from '@/composables/useSpeech'
 import { usePcmStreamRecorder } from '@/composables/usePcmStreamRecorder'
-import { transcribeSpeech } from '@/api/hermes/stt'
-import { isServerTtsProvider } from '@/api/hermes/tts'
+import { transcribeSpeech } from '@/api/studio/stt'
+import { isServerTtsProvider } from '@/api/studio/tts'
 import { useVoiceApiConnections } from '@/composables/useVoiceApiConnections'
 import { useVoiceSettings } from '@/composables/useVoiceSettings'
 import { speedToEdgeRate, hzToEdgePitch } from '@/utils/ttsHelpers'
@@ -15,7 +15,7 @@ import VoiceApiConfigurator from './voice/VoiceApiConfigurator.vue'
 import HermesVoiceConfigSummary from './voice/HermesVoiceConfigSummary.vue'
 import LocalSttModelCard from './voice/LocalSttModelCard.vue'
 import type { VoiceApiConnection, VoiceApiKind, VoiceApiProvider, VoiceApiSavePayload } from '@/types/voice-api'
-import type { StoredSttProvider } from '@/api/hermes/stt-settings'
+import type { StoredSttProvider } from '@/api/studio/stt-settings'
 
 interface VoiceApiFormSavedPayload extends VoiceApiSavePayload {
   preset: {
@@ -175,6 +175,7 @@ function openaiOptionsFor(connection: VoiceApiConnection): OpenaiTtsOptions {
     pitch: connection.provider === 'edge' && Number.isFinite(edgePitch)
       ? hzToEdgePitch(edgePitch)
       : typeof options.pitch === 'string' ? options.pitch : undefined,
+    speed: typeof options.speed === 'string' || typeof options.speed === 'number' ? options.speed : undefined,
     stylePrompt: typeof options.stylePrompt === 'string' ? options.stylePrompt : undefined,
     provider,
   }

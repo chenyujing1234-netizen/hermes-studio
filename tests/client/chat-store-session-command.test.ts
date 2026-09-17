@@ -18,7 +18,7 @@ const chatApi = vi.hoisted(() => ({
   sessionWorkspaceUpdatedHandlers: [] as Array<(event: any) => void>,
 }))
 
-vi.mock('@/api/hermes/chat', () => ({
+vi.mock('@/api/studio/chat', () => ({
   startRunViaSocket: chatApi.startRunViaSocket,
   resumeSession: chatApi.resumeSession,
   registerSessionHandlers: chatApi.registerSessionHandlers,
@@ -42,6 +42,7 @@ vi.mock('@/api/hermes/chat', () => ({
     chatApi.sessionWorkspaceUpdatedHandlers.push(handler)
     return vi.fn()
   }),
+  onSessionSettingsUpdated: vi.fn(() => vi.fn()),
 }))
 
 vi.mock('@/api/client', () => ({
@@ -49,7 +50,7 @@ vi.mock('@/api/client', () => ({
   hasApiKey: () => false,
 }))
 
-vi.mock('@/api/hermes/sessions', () => ({
+vi.mock('@/api/studio/sessions', () => ({
   archiveSession: vi.fn(),
   deleteSession: vi.fn(),
   fetchSession: vi.fn(),
@@ -59,7 +60,7 @@ vi.mock('@/api/hermes/sessions', () => ({
   setSessionModel: vi.fn(),
 }))
 
-vi.mock('@/api/hermes/download', () => ({
+vi.mock('@/api/studio/download', () => ({
   getDownloadUrl: (_path: string, name: string) => `/download/${name}`,
 }))
 
@@ -123,7 +124,7 @@ describe('chat store session.command fanout', () => {
     ])
   })
 
-  it('requests safe insertion for a queued message and mirrors server state across windows', () => {
+  it('requests insertion for a queued message and mirrors boundary or immediate server state', () => {
     const store = useChatStore()
     const session = makeSession()
     session.source = 'cli'
@@ -181,10 +182,31 @@ describe('chat store session.command fanout', () => {
       event: 'run.queue_insertion.updated',
       session_id: 'session-1',
       generation: 'generation-1',
+      run_id: 'run-1',
       queue_id: 'queue-follow-up',
-      runtime: 'hermes',
+      runtime: 'codex',
+      phase: 'stopping_current_turn',
+      guarantee: 'immediate',
+      requested_at: 124,
+    })
+    expect(store.queueInsertionStates.get('session-1')).toEqual({
+      generation: 'generation-1',
+      runId: 'run-1',
+      queueId: 'queue-follow-up',
+      runtime: 'codex',
+      phase: 'stopping_current_turn',
+      guarantee: 'immediate',
+      requestedAt: 124,
+    })
+
+    handlers.onQueueInsertionUpdated({
+      event: 'run.queue_insertion.updated',
+      session_id: 'session-1',
+      generation: 'generation-1',
+      queue_id: 'queue-follow-up',
+      runtime: 'codex',
       phase: 'starting_queued_message',
-      guarantee: 'strict',
+      guarantee: 'immediate',
       requested_at: 123,
     })
     expect(store.queueInsertionStates.get('session-1')).toBeUndefined()
@@ -530,6 +552,35 @@ describe('chat store session.command fanout', () => {
     ])
   })
 
+  it('applies empty history snapshots and restores plans without persisted message bodies', async () => {
+    const store = useChatStore()
+    const session = makeSession()
+    session.messages = [{ id: 'stale', role: 'user', content: 'Old cached message', timestamp: 1 }]
+    store.sessions = [session]
+    const plan = {
+      session_id: session.id, run_id: 'run-1', plan_id: 'run-1', revision: 1,
+      execution_state: 'running', created_at: 2, updated_at: 2,
+      plan: [{ id: 'a', step: 'Verify', status: 'pending' }],
+    }
+    chatApi.resumeSession.mockImplementationOnce((sessionId: string, onResumed: (data: any) => void) => {
+      onResumed({ session_id: sessionId, messages: [], taskPlans: [plan], messageTotal: 0, isWorking: false })
+      return {} as any
+    })
+
+    await store.switchSession(session.id)
+    expect(store.activeSession?.messages).toEqual([
+      expect.objectContaining({ taskPlan: plan }),
+    ])
+    expect(store.activeSession?.loadedMessageCount).toBe(0)
+
+    chatApi.resumeSession.mockImplementationOnce((sessionId: string, onResumed: (data: any) => void) => {
+      onResumed({ session_id: sessionId, messages: [], taskPlans: [], messageTotal: 0, isWorking: false })
+      return {} as any
+    })
+    await store.switchSession(session.id)
+    expect(store.activeSession?.messages).toEqual([])
+  })
+
   it('adds and switches to a branched child session from session.command branch events', async () => {
     const store = useChatStore()
     const session = makeSession()
@@ -537,20 +588,22 @@ describe('chat store session.command fanout', () => {
     store.activeSessionId = 'session-1'
     store.activeSession = session
 
-    chatApi.resumeSession.mockImplementationOnce((sessionId: string, onResumed: (data: any) => void) => {
+    chatApi.resumeSession.mockImplementation((sessionId: string, onResumed: (data: any) => void) => {
       onResumed({
         session_id: sessionId,
-        messages: [
+        messages: sessionId === 'branch-1' ? [
           { id: 1, role: 'user', content: 'Previous question', timestamp: 1 },
           { id: 2, role: 'assistant', content: 'Previous answer', timestamp: 2 },
+        ] : [
+          { id: 3, role: 'command', content: 'Branched session "Side path" from session-1.', timestamp: 3 },
         ],
         parentSessionId: 'session-1',
         forkPointMessageId: '2',
         parentTitle: 'session',
         parentLastMessage: 'Previous answer',
         parentLastMessageRole: 'assistant',
-        messageLoadedCount: 2,
-        messageTotal: 2,
+        messageLoadedCount: sessionId === 'branch-1' ? 2 : 1,
+        messageTotal: sessionId === 'branch-1' ? 2 : 1,
         hasMoreBefore: false,
         isWorking: false,
         events: [],
@@ -607,12 +660,17 @@ describe('chat store session.command fanout', () => {
     expect(store.activeSessionId).toBe('branch-1')
     expect(chatApi.resumeSession).toHaveBeenCalledWith('branch-1', expect.any(Function), 'default', 'chat-run')
 
+    expect(store.sessions.find((item: Session) => item.id === 'session-1')?.messages.at(-1)).toMatchObject({
+      role: 'command',
+      commandAction: 'branch',
+      content: 'Branched session "Side path" from session-1.',
+    })
+
     await store.switchSession('session-1')
     expect(store.activeSessionId).toBe('session-1')
     expect(store.activeSession?.id).toBe('session-1')
     expect(store.sessions.find((item: Session) => item.id === 'session-1')?.messages.at(-1)).toMatchObject({
       role: 'command',
-      commandAction: 'branch',
       content: 'Branched session "Side path" from session-1.',
     })
 

@@ -11,12 +11,12 @@ import {
   fetchMcuDevices,
   updateMcuDeviceName,
   type McuDevice,
-} from '@/api/hermes/mcu-devices'
+} from '@/api/studio/mcu-devices'
 
 const { t } = useI18n()
 const message = useMessage()
 const dialog = useDialog()
-const purchaseUrl = 'https://hermes-studio.ai/docs/hermes-esp32-intro/index.html'
+const purchaseUrl = 'https://ekkostudio.xyz/docs/hermes-esp32-intro/index.html'
 const showAddModal = ref(false)
 const loading = ref(false)
 const saving = ref(false)

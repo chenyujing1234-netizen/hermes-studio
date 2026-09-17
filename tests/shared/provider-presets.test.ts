@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   PROVIDER_PRESETS as SERVER_PROVIDER_PRESETS,
   buildProviderModelMap as buildServerProviderModelMap,
-} from '../../packages/server/src/shared/providers'
-import { PROVIDER_ENV_MAP } from '../../packages/server/src/services/config-helpers'
+} from '../../packages/server/src/modules/studio/contracts/providers'
+import { PROVIDER_ENV_MAP } from '../../packages/server/src/modules/hermes/services/profiles/config'
 
 const OPENAI_CODEX_PROVIDER = 'openai-codex'
 const COPILOT_PROVIDER = 'copilot'
@@ -237,7 +237,7 @@ describe('provider presets', () => {
     expect(missingMappings).toEqual([])
   })
 
-  it('routes apikey.fun Codex through the Responses transport', () => {
+  it('routes apikey.fan Codex through the Responses transport', () => {
     const preset = SERVER_PROVIDER_PRESETS.find((candidate) => candidate.value === FUN_CODEX_PROVIDER)
     expect(preset?.api_mode).toBe('codex_responses')
   })

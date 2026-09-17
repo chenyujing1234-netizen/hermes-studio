@@ -36,6 +36,22 @@ const rawMessages: Record<string, Record<string, unknown>> = {
 }
 
 const messages: Record<string, Record<string, unknown>> = {}
+
+it('defines task plan dynamic statuses and progress placeholders in every raw locale', () => {
+  const keys = ['title', 'progress', 'pending', 'in_progress', 'completed', 'running', 'ended', 'interrupted', 'failed']
+  for (const locale of supportedLocales) {
+    const plan = rawMessages[locale].taskPlan as Record<string, string>
+    expect(plan, locale).toBeDefined()
+    expect(Object.keys(plan).sort(), locale).toEqual([...keys].sort())
+    for (const key of keys) {
+      expect(typeof plan[key], `${locale}: ${key}`).toBe('string')
+      expect(plan[key].trim(), `${locale}: ${key}`).not.toBe('')
+      if (locale !== 'en') expect(plan[key], `${locale}: ${key} copies English`).not.toBe(en.taskPlan[key as keyof typeof en.taskPlan])
+    }
+    expect(interpolationNames(plan.progress), locale).toEqual(['completed', 'total'])
+  }
+})
+
 for (const [locale, localeMessages] of Object.entries(rawMessages)) {
   messages[locale] = locale === 'en'
     ? localeMessages
@@ -376,7 +392,6 @@ function labelLength(value: unknown): number {
 
 describe('i18n locale coverage', () => {
   const ALLOWED_MISSING_KEYS = new Set([
-    'changelog.new_0_5_4_7',
     'chat.sessionNotFound',
   ])
 

@@ -37,12 +37,12 @@ const clientSocketMocks = vi.hoisted(() => {
   return { io, sockets }
 })
 
-vi.mock('../../packages/server/src/middleware/user-auth', () => ({
+vi.mock('../../packages/server/src/modules/studio/middleware/auth', () => ({
   authenticateUserToken: authMocks.authenticateUserToken,
   inspectAppUserToken: authMocks.inspectAppUserToken,
 }))
 
-vi.mock('../../packages/server/src/services/system-info', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/system-info', () => ({
   getDeviceId: authMocks.getDeviceId,
 }))
 
@@ -50,7 +50,7 @@ vi.mock('socket.io-client', () => ({
   io: clientSocketMocks.io,
 }))
 
-vi.mock('../../packages/server/src/config', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/config', () => ({
   config: {
     port: 8648,
     appRelay: { entitlementRequired: false },
@@ -120,7 +120,7 @@ describe('LocalAppRelayServer', () => {
   it('accepts the selected machine with a valid token or in login-only mode', async () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any)
     server.init()
 
@@ -169,7 +169,7 @@ describe('LocalAppRelayServer', () => {
       tokenId: 'entitlement-001',
     }
     const verifyEntitlementToken = vi.fn((token: string) => token === 'signed-entitlement' ? entitlement : null)
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       entitlementRequired: true,
@@ -226,7 +226,7 @@ describe('LocalAppRelayServer', () => {
   it('records the signed mode and token lifetime when an entitlement has expired', async () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       entitlementRequired: true,
@@ -271,7 +271,7 @@ describe('LocalAppRelayServer', () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
     const fetchImpl = vi.fn()
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       fetchImpl: fetchImpl as any,
@@ -320,7 +320,7 @@ describe('LocalAppRelayServer', () => {
   it('tracks an authenticated App as online, notifies it when deleted, and rejects its next connection', async () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, { machineId: 'hwui_local_machine_1234567890' })
     server.init()
     authMocks.inspectAppUserToken.mockResolvedValue({
@@ -378,7 +378,7 @@ describe('LocalAppRelayServer', () => {
           status: 200,
           headers: { 'content-type': 'application/json' },
         }))
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       localBaseUrl: 'http://127.0.0.1:8748',
@@ -396,7 +396,7 @@ describe('LocalAppRelayServer', () => {
     app.__handlers.get('http.request')({
       id: 'protected-before-login',
       method: 'GET',
-      path: '/api/hermes/sessions',
+      path: '/api/studio/sessions',
     }, deniedAck)
     await vi.waitFor(() => expect(deniedAck).toHaveBeenCalledWith(expect.objectContaining({
       status: 401,
@@ -428,7 +428,7 @@ describe('LocalAppRelayServer', () => {
     app.__handlers.get('http.request')({
       id: 'protected-after-login',
       method: 'GET',
-      path: '/api/hermes/sessions',
+      path: '/api/studio/sessions',
     }, protectedAck)
     await vi.waitFor(() => expect(protectedAck).toHaveBeenCalledWith(expect.objectContaining({ status: 200 })))
     const protectedHeaders = fetchImpl.mock.calls[1][1]?.headers as Headers
@@ -446,7 +446,7 @@ describe('LocalAppRelayServer', () => {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }))
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       localBaseUrl: 'http://127.0.0.1:8748',
@@ -489,7 +489,7 @@ describe('LocalAppRelayServer', () => {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }))
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       localBaseUrl: 'http://127.0.0.1:8748',
@@ -507,7 +507,8 @@ describe('LocalAppRelayServer', () => {
     app.__handlers.get('http.request')({
       id: 'http-1',
       method: 'GET',
-      path: '/api/hermes/sessions?profile=default',
+      path: '/api/studio/sessions?profile=default',
+      headers: { 'if-match': '"revision-1"' },
     }, ack)
 
     await vi.waitFor(() => expect(ack).toHaveBeenCalledWith(expect.objectContaining({
@@ -516,11 +517,12 @@ describe('LocalAppRelayServer', () => {
       body: '{"sessions":[]}',
     })))
     expect(fetchImpl).toHaveBeenCalledWith(
-      'http://127.0.0.1:8748/api/hermes/sessions?profile=default',
+      'http://127.0.0.1:8748/api/studio/sessions?profile=default',
       expect.objectContaining({ method: 'GET' }),
     )
     const headers = fetchImpl.mock.calls[0][1]?.headers as Headers
     expect(headers.get('authorization')).toBe('Bearer local-user-token')
+    expect(headers.get('if-match')).toBe('"revision-1"')
     expect(clientSocketMocks.io).not.toHaveBeenCalled()
 
     fetchImpl.mockResolvedValueOnce(new Response(Uint8Array.from([7, 8, 9]), {
@@ -531,7 +533,7 @@ describe('LocalAppRelayServer', () => {
     app.__handlers.get('http.request')({
       id: 'binary-1',
       method: 'POST',
-      path: '/api/hermes/tts/synthesize',
+      path: '/api/studio/tts/synthesize',
       headers: { 'content-type': 'application/octet-stream' },
       bodyBytes: Uint8Array.from([1, 2, 3]),
     }, binaryAck)
@@ -546,10 +548,69 @@ describe('LocalAppRelayServer', () => {
     expect(Buffer.from(binaryResponse)).toEqual(Buffer.from([7, 8, 9]))
   })
 
+  it('streams opted-in LAN downloads in bounded chunks while preserving legacy responses', async () => {
+    const namespace = createMockNamespace()
+    const io = { of: vi.fn(() => namespace) }
+    const fetchImpl = vi.fn(async () => new Response(Uint8Array.from([1, 2, 3, 4, 5]), {
+      status: 200,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-length': '5',
+      },
+    }))
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
+    const server = new LocalAppRelayServer(io as any, {
+      machineId: 'hwui_local_machine_1234567890',
+      localBaseUrl: 'http://127.0.0.1:8748',
+      fetchImpl: fetchImpl as any,
+    })
+    server.init()
+
+    const app = createMockAppSocket('app-download', {
+      role: 'app',
+      token: 'local-user-token',
+      machineId: 'hwui_local_machine_1234567890',
+    })
+    await connectApp(namespace, app)
+    expect(app.emit).toHaveBeenCalledWith('relay.ready', expect.objectContaining({
+      capabilities: expect.arrayContaining(['http.download.chunked']),
+    }))
+
+    const openAck = vi.fn()
+    app.__handlers.get('http.request')({
+      id: 'download-open',
+      method: 'GET',
+      path: '/api/studio/files/download?path=test.bin',
+      streamBinary: true,
+    }, openAck)
+    await vi.waitFor(() => expect(openAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'download-open',
+      status: 200,
+      download: { id: expect.any(String), totalBytes: 5 },
+    })))
+    const downloadId = openAck.mock.calls[0][0].download.id
+
+    const firstAck = vi.fn()
+    app.__handlers.get('http.download.chunk')({ id: downloadId, maxBytes: 3 }, firstAck)
+    await vi.waitFor(() => expect(firstAck).toHaveBeenCalledWith(expect.objectContaining({
+      receivedBytes: 3,
+      done: false,
+    })))
+    expect(Array.from(firstAck.mock.calls[0][0].bodyBytes)).toEqual([1, 2, 3])
+
+    const secondAck = vi.fn()
+    app.__handlers.get('http.download.chunk')({ id: downloadId, maxBytes: 3 }, secondAck)
+    await vi.waitFor(() => expect(secondAck).toHaveBeenCalledWith(expect.objectContaining({
+      receivedBytes: 5,
+      done: true,
+    })))
+    expect(Array.from(secondAck.mock.calls[0][0].bodyBytes)).toEqual([4, 5])
+  })
+
   it('bridges /chat-run directly with the same App socket events as the cloud relay', async () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       localBaseUrl: 'http://127.0.0.1:8748',
@@ -598,6 +659,22 @@ describe('LocalAppRelayServer', () => {
     })))
     expect(local.emit).toHaveBeenCalledWith('run', { session_id: 'session-1', input: 'hello' })
 
+    const resumeAck = vi.fn()
+    app.__handlers.get('socket.event')({
+      id: 'chat-1',
+      event: 'app.resume',
+      payload: { session_id: 'session-1', id: 'cache-1' },
+    }, resumeAck)
+    await vi.waitFor(() => expect(resumeAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'chat-1',
+      ok: true,
+      event: 'app.resume',
+    })))
+    expect(local.emit).toHaveBeenCalledWith('app.resume', {
+      session_id: 'session-1',
+      id: 'cache-1',
+    })
+
     const insertAck = vi.fn()
     app.__handlers.get('socket.event')({
       id: 'chat-1',
@@ -614,6 +691,27 @@ describe('LocalAppRelayServer', () => {
       queue_id: 'queue-1',
     })
 
+    const locationAck = vi.fn()
+    app.__handlers.get('socket.event')({
+      id: 'chat-1',
+      event: 'location.respond',
+      payload: {
+        session_id: 'session-1',
+        location_request_id: 'location-1',
+        status: 'denied',
+      },
+    }, locationAck)
+    await vi.waitFor(() => expect(locationAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'chat-1',
+      ok: true,
+      event: 'location.respond',
+    })))
+    expect(local.emit).toHaveBeenCalledWith('location.respond', {
+      session_id: 'session-1',
+      location_request_id: 'location-1',
+      status: 'denied',
+    })
+
     local.__onAny('message.delta', { session_id: 'session-1', delta: 'hi' })
     expect(app.emit).toHaveBeenCalledWith('socket.event', {
       id: 'chat-1',
@@ -626,7 +724,7 @@ describe('LocalAppRelayServer', () => {
   it('bridges /group-chat with authenticated Socket.IO acknowledgements', async () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       localBaseUrl: 'http://127.0.0.1:8748',
@@ -682,7 +780,7 @@ describe('LocalAppRelayServer', () => {
   it('bridges workflow status subscriptions with the authenticated Studio token', async () => {
     const namespace = createMockNamespace()
     const io = { of: vi.fn(() => namespace) }
-    const { LocalAppRelayServer } = await import('../../packages/server/src/services/app-relay/server')
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
     const server = new LocalAppRelayServer(io as any, {
       machineId: 'hwui_local_machine_1234567890',
       localBaseUrl: 'http://127.0.0.1:8748',
@@ -731,6 +829,128 @@ describe('LocalAppRelayServer', () => {
       ok: true,
       namespace: '/workflow',
       event: 'workflow.status.subscribe',
+      payload: { ok: true, data: { statuses: [{ workflowId: 'workflow-a', status: 'idle' }] } },
+    })))
+  })
+
+  it('bridges terminal reads with the authenticated Studio token', async () => {
+    const namespace = createMockNamespace()
+    const io = { of: vi.fn(() => namespace) }
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
+    const server = new LocalAppRelayServer(io as any, {
+      machineId: 'hwui_local_machine_1234567890',
+      localBaseUrl: 'http://127.0.0.1:8748',
+    })
+    server.init()
+
+    const app = createMockAppSocket('app-workflow', {
+      role: 'app',
+      token: 'local-user-token',
+      machineId: 'hwui_local_machine_1234567890',
+    })
+    await connectApp(namespace, app)
+    const openAck = vi.fn()
+    app.__handlers.get('socket.open')({
+      id: 'terminal-1',
+      namespace: '/terminal',
+      auth: { token: 'untrusted-token' },
+    }, openAck)
+
+    await vi.waitFor(() => expect(openAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'terminal-1',
+      ok: true,
+      namespace: '/terminal',
+    })))
+    expect(clientSocketMocks.io).toHaveBeenCalledWith(
+      'http://127.0.0.1:8748/terminal',
+      expect.objectContaining({ auth: { token: 'local-user-token' } }),
+    )
+
+    const local = clientSocketMocks.sockets[0]
+    local.emit.mockImplementation((event: string, payload: unknown, ack?: (response: unknown) => void) => {
+      if (event === 'terminal.read') {
+        ack?.({ ok: true, data: { chunks: [{ seq: 1, data: 'hello\r\n' }], cursor: 1 } })
+      }
+    })
+    const eventAck = vi.fn()
+    app.__handlers.get('socket.event')({
+      id: 'terminal-1',
+      event: 'terminal.read',
+      payload: { terminalId: 'terminal-a', lease: 'lease-a', cursor: 0, stream: true },
+      ack: true,
+    }, eventAck)
+
+    await vi.waitFor(() => expect(eventAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'terminal-1',
+      ok: true,
+      namespace: '/terminal',
+      event: 'terminal.read',
+      payload: { ok: true, data: { chunks: [{ seq: 1, data: 'hello\r\n' }], cursor: 1 } },
+    })))
+    const pushed = { terminalId: 'terminal-a', lease: 'lease-a', batch: 1, chunks: [{ seq: 1, data: 'echo' }], cursor: 1 }
+    local.__onAny('terminal.output', pushed)
+    expect(app.emit).toHaveBeenCalledWith('socket.event', expect.objectContaining({
+      id: 'terminal-1', namespace: '/terminal', event: 'terminal.output', payload: pushed,
+    }))
+    const deniedAck = vi.fn()
+    app.__handlers.get('socket.event')({ id: 'terminal-1', event: 'run', payload: {}, ack: true }, deniedAck)
+    await vi.waitFor(() => expect(deniedAck).toHaveBeenCalledWith(expect.objectContaining({
+      error: expect.objectContaining({ code: 'event_not_allowed' }),
+    })))
+  })
+
+  it('bridges unified App subscriptions over local and manually addressed relay', async () => {
+    const namespace = createMockNamespace()
+    const io = { of: vi.fn(() => namespace) }
+    const { LocalAppRelayServer } = await import('../../packages/server/src/modules/studio/services/app-relay/server')
+    const server = new LocalAppRelayServer(io as any, {
+      machineId: 'hwui_local_machine_1234567890',
+      localBaseUrl: 'http://127.0.0.1:8748',
+    })
+    server.init()
+
+    const app = createMockAppSocket('app-workflow', {
+      role: 'app',
+      token: 'local-user-token',
+      machineId: 'hwui_local_machine_1234567890',
+    })
+    await connectApp(namespace, app)
+    const openAck = vi.fn()
+    app.__handlers.get('socket.open')({
+      id: 'workflow-1',
+      namespace: '/chat-run',
+      auth: { token: 'untrusted-token', appEventVersion: 1 }, query: { profile: 'default' },
+    }, openAck)
+
+    await vi.waitFor(() => expect(openAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'workflow-1',
+      ok: true,
+      namespace: '/chat-run',
+    })))
+    expect(clientSocketMocks.io).toHaveBeenCalledWith(
+      'http://127.0.0.1:8748/chat-run',
+      expect.objectContaining({ auth: { token: 'local-user-token', appEventVersion: 1 } }),
+    )
+
+    const local = clientSocketMocks.sockets[0]
+    local.emit.mockImplementation((event: string, payload: unknown, ack?: (response: unknown) => void) => {
+      if (event === 'app.events.subscribe') {
+        ack?.({ ok: true, data: { statuses: [{ workflowId: 'workflow-a', status: 'idle' }] } })
+      }
+    })
+    const eventAck = vi.fn()
+    app.__handlers.get('socket.event')({
+      id: 'workflow-1',
+      event: 'app.events.subscribe',
+      payload: { schema_version: 1, profile: 'default', types: ['workflow.run.completed'] },
+      ack: true,
+    }, eventAck)
+
+    await vi.waitFor(() => expect(eventAck).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'workflow-1',
+      ok: true,
+      namespace: '/chat-run',
+      event: 'app.events.subscribe',
       payload: { ok: true, data: { statuses: [{ workflowId: 'workflow-a', status: 'idle' }] } },
     })))
   })

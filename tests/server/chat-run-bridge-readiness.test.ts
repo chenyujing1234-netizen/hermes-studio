@@ -1,9 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+const saveTaskPlanMock = vi.hoisted(() => vi.fn())
+vi.mock('../../packages/server/src/modules/studio/repositories/task-plan-store', () => ({
+  saveTaskPlan: saveTaskPlanMock, listTaskPlansForPage: vi.fn(() => []),
+}))
+
 const handleBridgeRunMock = vi.hoisted(() => vi.fn(async () => {}))
 const resumeBridgeRunMock = vi.hoisted(() => vi.fn(async () => {}))
+const handleEkkoAgentRunMock = vi.hoisted(() => vi.fn(async () => {}))
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/handle-ekko-agent-run', () => ({
+  handleEkkoAgentRun: handleEkkoAgentRunMock,
+}))
 const handleCodingAgentRunMock = vi.hoisted(() => vi.fn(async () => {}))
 const loadSessionStateFromDbMock = vi.hoisted(() => vi.fn())
+const startBridgeMock = vi.hoisted(() => vi.fn())
 const ensureReadyMock = vi.hoisted(() => vi.fn())
 const getRuntimeStateMock = vi.hoisted(() => vi.fn())
 const userCanAccessProfileMock = vi.hoisted(() => vi.fn((_user: unknown, _profile: string) => true))
@@ -19,63 +29,88 @@ const bridgeMock = vi.hoisted(() => ({
   clarifyRespond: vi.fn(async () => ({ resolved: true })),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/run-chat/handle-bridge-run', () => ({
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/handle-bridge-run', () => ({
   handleBridgeRun: handleBridgeRunMock,
   resumeBridgeRun: resumeBridgeRunMock,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/run-chat/load-state', () => ({
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/load-state', () => ({
   loadSessionStateFromDb: loadSessionStateFromDbMock,
   resolveRunSource: vi.fn((source?: string) => source || 'cli'),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/run-chat/handle-coding-agent-run', () => ({
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/handle-coding-agent-run', () => ({
   handleCodingAgentRun: handleCodingAgentRunMock,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/run-chat/session-command', () => ({
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/session-command', () => ({
   handleSessionCommand: vi.fn(),
   isSessionCommand: vi.fn(() => false),
   parseSessionCommand: vi.fn(() => null),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/agent-bridge', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/bridge/index', () => ({
   AgentBridgeClient: vi.fn(() => bridgeMock),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/agent-bridge/manager', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/bridge/manager', () => ({
   getAgentBridgeManager: vi.fn(() => ({
     ensureReady: ensureReadyMock,
     getRuntimeState: getRuntimeStateMock,
   })),
 }))
 
-vi.mock('../../packages/server/src/services/logger', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/chat-agent-runtime', () => ({
+  createPrimaryAgentBridge: vi.fn(() => bridgeMock),
+  getPrimaryAgentBridgeManager: vi.fn(() => ({
+    start: startBridgeMock,
+    ensureReady: ensureReadyMock,
+    getRuntimeState: getRuntimeStateMock,
+  })),
+  redactPrimaryAgentBridgeError: (error?: string, endpoint?: string, replacement = '[redacted endpoint]') => {
+    if (!error) return error
+    const values = [endpoint, endpoint?.replace(/^(?:ipc|tcp):\/\//, '')].filter(Boolean) as string[]
+    return values.reduce((value, candidate) => value.split(candidate).join(replacement), error)
+  },
+  chatCodingAgentRunManager: {
+    resolveApproval: vi.fn(() => ({ handled: false, resolved: false })),
+    resolveClarification: vi.fn(() => ({ handled: false, resolved: false })),
+    stop: vi.fn(),
+  },
+  handleChatCodingAgentSessionCommand: vi.fn(),
+  parseChatCodingAgentSessionCommand: vi.fn(() => null),
+  getChatEkkoAgent: vi.fn(() => ({ requestBoundaryInterrupt: vi.fn() })),
+  respondToChatEkkoToolApproval: vi.fn(() => ({ handled: false, resolved: false })),
+  respondToChatEkkoClarification: vi.fn(() => ({ handled: false, resolved: false })),
+}))
+
+vi.mock('../../packages/server/src/modules/studio/public/logging', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
-vi.mock('../../packages/server/src/lib/llm-prompt', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/runs/prompt', () => ({
   getSystemPrompt: vi.fn(() => 'system prompt'),
 }))
 
-vi.mock('../../packages/server/src/db/hermes/session-store', () => ({
+vi.mock('../../packages/server/src/modules/studio/repositories/session-store', () => ({
+  getSessionNotificationPreview: vi.fn(() => null),
   getSession: getSessionMock,
   getSessionMetadata: getSessionMock,
   getSessionDetail: vi.fn(() => null),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/profile-config', () => ({
   getActiveProfileName: vi.fn(() => 'default'),
   getProfileDir: vi.fn(() => '/tmp/hermes-default'),
   listProfileNamesFromDisk: vi.fn(() => ['default', 'research']),
 }))
 
-vi.mock('../../packages/server/src/middleware/user-auth', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/auth', () => ({
   authenticateUserToken: vi.fn(),
   isAuthEnabled: vi.fn(async () => false),
 }))
 
-vi.mock('../../packages/server/src/db/hermes/users-store', () => ({
+vi.mock('../../packages/server/src/modules/studio/repositories/users-store', () => ({
   userCanAccessProfile: userCanAccessProfileMock,
 }))
 
@@ -108,7 +143,7 @@ function makeServerHarness() {
 
 describe('ChatRunSocket global pending interactions', () => {
   it('publishes a running snapshot and lightweight completion activity for the profile', async () => {
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
     ;(server as any).sessionMap.set('session-running', {
@@ -142,7 +177,7 @@ describe('ChatRunSocket global pending interactions', () => {
   })
 
   it('publishes approval and clarify lifecycle events to the authenticated profile audience', async () => {
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -166,7 +201,7 @@ describe('ChatRunSocket global pending interactions', () => {
   })
 
   it('does not republish group-chat approvals through the generic chat pending audience', async () => {
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
     ;(server as any).sessionMap.set('gc_run_group', {
@@ -195,7 +230,7 @@ describe('ChatRunSocket global pending interactions', () => {
   })
 
   it('rejects cross-profile resume, approval, and clarify requests before joining or calling the bridge', async () => {
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { handlers, io, socket } = makeServerHarness()
     ;(socket.data as any).user = { id: 7, username: 'limited-user', role: 'user' }
     userCanAccessProfileMock.mockImplementation((_user: unknown, profile: string) => profile === 'default')
@@ -246,12 +281,20 @@ describe('ChatRunSocket global pending interactions', () => {
     expect(socket.emit).toHaveBeenCalledWith('clarify.resolved', expect.objectContaining({
       clarify_id: 'clarify-research', resolved: false,
     }))
+    expect(socket.emit).toHaveBeenCalledWith('clarify.resolved', expect.objectContaining({
+      clarify_id: 'clarify-default',
+      resolved: false,
+      stale: true,
+      error: 'Clarification is no longer pending.',
+    }))
   })
 })
 
 describe('ensureBridgeReadyForChatRun', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    startBridgeMock.mockReset()
+    startBridgeMock.mockResolvedValue(undefined)
     ensureReadyMock.mockReset()
     getRuntimeStateMock.mockReset()
     bridgeMock.status.mockReset()
@@ -277,9 +320,10 @@ describe('ensureBridgeReadyForChatRun', () => {
   })
 
   it('allows reachable bridge readiness', async () => {
-    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
 
     await expect(ensureBridgeReadyForChatRun()).resolves.toEqual({ ok: true })
+    expect(startBridgeMock).toHaveBeenCalledTimes(1)
     expect(ensureReadyMock).toHaveBeenCalledWith({ timeoutMs: 1000, connectRetryMs: 0, recover: false })
   })
 
@@ -290,7 +334,7 @@ describe('ensureBridgeReadyForChatRun', () => {
       endpoint: 'ipc:///tmp/hermes-agent-bridge.sock',
       error: 'connect ECONNREFUSED ipc:///tmp/hermes-agent-bridge.sock',
     })
-    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
 
     await expect(ensureBridgeReadyForChatRun()).resolves.toEqual({
       ok: false,
@@ -305,7 +349,7 @@ describe('ensureBridgeReadyForChatRun', () => {
       endpoint: 'tcp://example.internal:43123',
       error: 'connect ECONNREFUSED example.internal:43123',
     })
-    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
 
     await expect(ensureBridgeReadyForChatRun()).resolves.toEqual({
       ok: false,
@@ -315,18 +359,45 @@ describe('ensureBridgeReadyForChatRun', () => {
 
   it('handles thrown ensureReady failures', async () => {
     ensureReadyMock.mockRejectedValueOnce(new Error('bridge startup timed out'))
-    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
 
     await expect(ensureBridgeReadyForChatRun()).resolves.toEqual({
       ok: false,
       error: 'bridge startup timed out',
     })
   })
+
+  it('returns the recorded Runtime failure without starting the bridge when Runtime is unavailable', async () => {
+    const previousSource = process.env.HERMES_RUNTIME_SOURCE
+    process.env.HERMES_RUNTIME_SOURCE = 'none'
+    const registry = await import('../../packages/server/src/modules/studio/public/agent-status-registry')
+    registry.updateAgentStatus('hermes', {
+      installed: false,
+      source: 'not-installed',
+      error: 'Runtime 0.21.0 is missing python/run_agent.py',
+    })
+    try {
+      const { ensureBridgeReadyForChatRun } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
+      await expect(ensureBridgeReadyForChatRun()).resolves.toEqual({
+        ok: false,
+        error: 'Runtime 0.21.0 is missing python/run_agent.py',
+        runtimeUnavailable: true,
+      })
+      expect(startBridgeMock).not.toHaveBeenCalled()
+      expect(ensureReadyMock).not.toHaveBeenCalled()
+    } finally {
+      if (previousSource === undefined) delete process.env.HERMES_RUNTIME_SOURCE
+      else process.env.HERMES_RUNTIME_SOURCE = previousSource
+      registry.resetAgentStatusRegistryForTests()
+    }
+  })
 })
 
 describe('ChatRunSocket bridge readiness gating', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    startBridgeMock.mockReset()
+    startBridgeMock.mockResolvedValue(undefined)
     ensureReadyMock.mockReset()
     getRuntimeStateMock.mockReset()
     bridgeMock.status.mockReset()
@@ -362,7 +433,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       endpoint: 'ipc:///tmp/hermes-agent-bridge.sock',
       error: 'bridge offline',
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -382,7 +453,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
   })
 
   it('routes legacy api_server runs through the bridge path', async () => {
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -399,7 +470,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
   })
 
   it('routes global-agent Hermes runs through the bridge run path while preserving session source', async () => {
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -427,7 +498,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       endpoint: 'ipc:///tmp/hermes-agent-bridge.sock',
       error: 'bridge offline',
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -450,7 +521,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
 
   it('routes global coding-agent runs through the coding-agent path while preserving session source', async () => {
     handleCodingAgentRunMock.mockResolvedValueOnce({ runId: 'coding-run-1', messageId: 42 })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -504,7 +575,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
         status: 'ready',
         endpoint: 'ipc:///tmp/hermes-agent-bridge.sock',
       })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -571,7 +642,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
         current_run_id: 'run-1',
         loaded: true,
       })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -610,7 +681,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       events: [{ event: 'run.started', data: { run_id: 'stale-run' } }],
       queue: [],
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -674,7 +745,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       events: [],
       queue: [],
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -711,7 +782,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       events: [],
       queue: [],
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -750,7 +821,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       events: [],
       queue: [],
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
     let sourceAtResume = ''
@@ -803,7 +874,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       events: [],
       queue: [],
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -853,7 +924,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
       events: [],
       queue: [],
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { emitted, handlers, io, socket } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
 
@@ -880,7 +951,7 @@ describe('ChatRunSocket bridge readiness gating', () => {
     bridgeMock.close.mockImplementation(async () => {
       order.push('close')
     })
-    const { ChatRunSocket } = await import('../../packages/server/src/services/hermes/run-chat')
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
     const { io } = makeServerHarness()
     const server = new ChatRunSocket(io as any)
     ;(server as any).sessionMap.set('session-1', {
@@ -910,5 +981,101 @@ describe('ChatRunSocket bridge readiness gating', () => {
     expect(order.slice(1)).toEqual(['close', 'close'])
     expect((server as any).sessionMap.size).toBe(0)
     expect((server as any).closing).toBe(true)
+  })
+})
+
+
+describe('ChatRunSocket MCP task plan lifecycle', () => {
+  it.each(['coding_agent', 'workflow', 'group_chat'])('does not inject shared planning into Ekko on %s', async source => {
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
+    const { io, socket } = makeServerHarness()
+    const server = new ChatRunSocket(io as any)
+    const begin = vi.spyOn((server as any).taskPlanRuns, 'begin')
+    handleEkkoAgentRunMock.mockClear()
+    await (server as any).handleRun(socket, {
+      session_id: 'session-1', source, coding_agent_id: 'ekko-agent', input: 'Implement a feature',
+    }, 'default')
+    expect(handleEkkoAgentRunMock).toHaveBeenCalledTimes(1)
+    const data = (handleEkkoAgentRunMock.mock.calls as any)[0][2]
+    expect(data.instructions || '').not.toContain('ekko_studio_update_plan')
+    expect(data.instructions || '').not.toContain('context_id=')
+    expect(data.task_plan_context_id).toBeUndefined()
+    expect(begin).not.toHaveBeenCalled()
+  })
+
+  it.each(['coding_agent', 'group_chat', 'workflow', 'global_agent'])('binds interactive contexts only on user-facing Coding Agent turns: %s', async source => {
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
+    const { emitted, io, socket } = makeServerHarness()
+    const server = new ChatRunSocket(io as any)
+    handleCodingAgentRunMock.mockReset()
+    let planContext = ''
+    let interactionContext: string | undefined
+    handleCodingAgentRunMock.mockImplementationOnce((async (_nsp: any, _socket: any, data: any, _profile: any, sessions: any) => {
+      planContext = data.task_plan_context_id
+      interactionContext = data.interaction_context_id
+      Object.assign(sessions.get(data.session_id), { isWorking: true, responseRun: { runMarker: 'coding-turn-1' } })
+      return { runId: 'reused-runtime-id', messageId: 42 }
+    }) as any)
+    await (server as any).handleRun(socket, { session_id: 'session-1', source: source === 'global_agent' ? 'coding_agent' : source, session_source: source === 'coding_agent' ? undefined : source, coding_agent_id: 'codex', input: 'Implement a feature' }, 'default')
+    expect(handleCodingAgentRunMock).toHaveBeenCalledTimes(1)
+    expect(planContext).toBeTruthy()
+    if (source === 'workflow' || source === 'global_agent') {
+      expect(interactionContext).toBeUndefined()
+      expect(() => server.requestClarification(planContext, 'default', { question: 'Q' })).toThrow('expired')
+    } else {
+      expect(interactionContext).toBe(planContext)
+      const result = server.requestClarification(interactionContext!, 'default', { question: 'Q' })
+      const prompt = emitted.find(item => item.event === 'clarify.requested')!
+      expect(prompt.payload.run_id).toBe('coding-turn-1')
+      expect(server.respondCodingAgentClarification('session-1', prompt.payload.clarify_id, 'A')).toBe(true)
+      await expect(result).resolves.toMatchObject({ response: 'A' })
+    }
+    server.emitExternalEvent('session-1', 'run.completed', {})
+    expect(() => server.requestClarification(planContext, 'default', { question: 'Q' })).toThrow('expired')
+  })
+
+  const input = { plan: [{ id: 'verify', step: 'Verify the change', status: 'in_progress' }] }
+
+  it.each(['run.completed', 'run.failed', 'abort.completed'])('settles a Codex plan before delivering %s', async event => {
+    saveTaskPlanMock.mockClear()
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
+    const { emitted, io, socket } = makeServerHarness()
+    const server = new ChatRunSocket(io as any)
+    let contextId = ''
+    handleCodingAgentRunMock.mockImplementationOnce((async (_nsp: any, _socket: any, data: any, _profile: any, sessions: any) => {
+      contextId = data.task_plan_context_id
+      Object.assign(sessions.get(data.session_id), { isWorking: true, responseRun: { runMarker: 'coding-turn-1' } })
+      return { runId: 'reused-runtime-id', messageId: 42 }
+    }) as any)
+    await (server as any).handleRun(socket, { session_id: 'session-1', source: 'coding_agent', coding_agent_id: 'codex', input: 'Implement a feature' }, 'default')
+    const snapshot = server.updateTaskPlan(contextId, 'default', input)
+    expect(snapshot.run_id).toBe('coding-turn-1')
+    expect(saveTaskPlanMock).toHaveBeenCalledWith(snapshot)
+    server.emitExternalEvent('session-1', event, { event, run_id: 'reused-runtime-id' })
+    const updates = emitted.filter(item => item.event === 'plan.updated')
+    expect(updates).toHaveLength(2)
+    expect(updates[1].payload).toMatchObject({ execution_state: event === 'run.completed' ? 'ended' : event === 'run.failed' ? 'failed' : 'interrupted', revision: 2 })
+    expect(emitted.indexOf(updates[1])).toBeLessThan(emitted.findIndex(item => item.event === event))
+    expect(() => server.updateTaskPlan(contextId, 'default', input)).toThrow('expired')
+  })
+
+  it.each([false, true])('keeps Hermes plans alive until its stream completes (interrupted=%s)', async interrupted => {
+    const { ChatRunSocket } = await import('../../packages/server/src/modules/studio/sockets/chat-run')
+    const { emitted, io, socket } = makeServerHarness()
+    const server = new ChatRunSocket(io as any)
+    ensureReadyMock.mockResolvedValue({ reachable: true, status: 'ready' })
+    let contextId = ''
+    handleBridgeRunMock.mockImplementationOnce((async (_nsp: any, _socket: any, data: any, _profile: any, sessions: any) => {
+      contextId = data.task_plan_context_id
+      const state = sessions.get(data.session_id)
+      Object.assign(state, { isWorking: true, activeRunMarker: 'cli-turn-1' })
+      server.updateTaskPlan(contextId, 'default', input)
+      state.activeRunMarker = undefined
+      state.isWorking = false
+      data.onEvent('run.completed', { event: 'run.completed', result: { interrupted } })
+    }) as any)
+    await (server as any).handleRun(socket, { session_id: 'session-1', source: 'cli', input: 'Implement a feature' }, 'default')
+    expect(emitted.filter(item => item.event === 'plan.updated').map(item => item.payload.execution_state)).toEqual(['running', interrupted ? 'interrupted' : 'ended'])
+    expect(() => server.updateTaskPlan(contextId, 'default', input)).toThrow('expired')
   })
 })
