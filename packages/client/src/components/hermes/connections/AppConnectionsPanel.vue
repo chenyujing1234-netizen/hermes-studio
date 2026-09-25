@@ -1,40 +1,64 @@
 <script setup lang="ts">
 import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NAlert, NButton, NDataTable, NEmpty, NModal, NPopconfirm, NSpin, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDataTable, NEmpty, NModal, NPopconfirm, NSpin, NSwitch, NTabPane, NTabs, NTag, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
+import { useRoute, useRouter } from 'vue-router'
 import QRCode from 'qrcode'
 import {
   createLanAppAuthorization,
   createCloudAppAuthorization,
   deleteAppConnection,
   fetchAppConnections,
+  updateAppConnectionPush,
   type AppConnection,
   type AppConnectionAccessFailure,
   type CloudAppAuthorizationResponse,
   type LanAppAuthorizationResponse,
-} from '@/api/hermes/app-connections'
-import { fetchStudioVersionManifest, type StudioMobileRelease } from '@/api/studio-versions'
+} from '@/api/studio/app-connections'
+import {
+  fetchAppRelayStatus,
+  updateAppRelayRoute,
+  type AppRelayRoute,
+} from '@/api/studio/app-relay'
+import { fetchStudioVersionManifest, type AppAccessMode, type StudioMobileRelease } from '@/api/studio/versions'
+import SocialMessagesView from '@/views/social-messages/SocialMessagesView.vue'
+
+type AppPanelView = 'list' | 'download' | 'messages'
+
+function normalizePanelView(value: unknown): AppPanelView {
+  if (value === 'list' || value === 'messages') return value
+  return 'download'
+}
 
 const DISMISSED_ACCESS_FAILURE_KEY = 'hermes:app-access-failure-dismissed-at'
+const APP_ACCESS_PURCHASE_URL = 'https://ekkostudio.xyz/pricing/'
+const PURCHASE_REQUIRED_FAILURE_CODES = new Set([
+  'cloud_subscription_required',
+  'paid_account_required',
+  'app_access_expired',
+])
 const DEFAULT_MOBILE_RELEASE: StudioMobileRelease = {
   version: '1.0.0',
   channels: {
     androidApk: {
-      githubUrl: 'https://github.com/EKKOLearnAI/hermes-studio/releases/download/v1.0.0/HStudio.apk',
-      cloudflareUrl: 'https://download.ekkolearnai.com/v1.0.0/HStudio.apk',
+      version: '1.0.0',
+      githubUrl: 'https://github.com/EKKOLearnAI/ekko-studio/releases/download/v1.0.0/Ekko Studio.apk',
+      cloudflareUrl: 'https://download.ekkolearnai.com/v1.0.0/Ekko Studio.apk',
       online: true,
     },
-    googlePlay: { url: '', online: false },
-    apple: { testFlightUrl: '', appStoreUrl: '', online: false },
+    googlePlay: { version: '1.0.0', url: '', online: false },
+    apple: { version: '1.0.0', testFlightUrl: '', appStoreUrl: '', online: false },
     harmony: { url: '', online: false },
   },
 }
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const route = useRoute()
+const router = useRouter()
 const message = useMessage()
 const loading = ref(false)
-const panelView = ref<'list' | 'download'>('download')
+const panelView = ref<AppPanelView>(normalizePanelView(route.query.view))
 const downloadSource = ref<'github' | 'cloudflare'>('cloudflare')
 const mobileRelease = ref<StudioMobileRelease>(DEFAULT_MOBILE_RELEASE)
 const connections = ref<AppConnection[]>([])
@@ -42,17 +66,21 @@ const accessFailure = ref<AppConnectionAccessFailure | null>(null)
 const dismissedAccessFailureAt = ref(readDismissedAccessFailureAt())
 const showScanModal = ref(false)
 const connectionTab = ref<'lan' | 'cloud'>('lan')
+const cloudRelayRoute = ref<AppRelayRoute>('official')
+const appAccessMode = ref<AppAccessMode | null>(null)
+const cloudRelayRouteLoading = ref(false)
 const authorizationLoading = ref<Record<'lan' | 'cloud', boolean>>({ lan: false, cloud: false })
 const deletingConnectionId = ref<number | null>(null)
+const updatingPushIds = ref(new Set<number>())
+let pushPreferenceRevision = 0
 const lanAuthorization = ref<LanAppAuthorizationResponse | null>(null)
 const cloudAuthorization = ref<CloudAppAuthorizationResponse | null>(null)
 const qrCodeDataUrls = ref<Record<'lan' | 'cloud', string>>({ lan: '', cloud: '' })
-type DownloadQrChannel = 'androidApk' | 'googlePlay' | 'apple' | 'harmony'
+type DownloadQrChannel = 'androidApk' | 'googlePlay' | 'apple'
 const downloadQrCodeDataUrls = ref<Record<DownloadQrChannel, string>>({
   androidApk: '',
   googlePlay: '',
   apple: '',
-  harmony: '',
 })
 const currentTimestamp = ref(Math.floor(Date.now() / 1000))
 let countdownTimer: ReturnType<typeof setInterval> | null = null
@@ -61,8 +89,15 @@ let scanConnectionVersions = new Map<string, number>()
 let connectionsRequestInFlight = false
 
 const CONNECTION_POLL_INTERVAL_MS = 3_000
+const APP_RELAY_ROUTE_OPTIONS = [
+  { value: 'official' as const, label: 'connections.app.officialRoute' },
+  { value: 'cloudflare' as const, label: 'connections.app.cloudflareRoute' },
+]
 
-const mobileVersionLabel = computed(() => `v${mobileRelease.value.version.replace(/^v/i, '')}`)
+const androidVersionLabel = computed(() => formatMobileVersion(mobileRelease.value.channels.androidApk.version))
+const googlePlayVersionLabel = computed(() => formatMobileVersion(mobileRelease.value.channels.googlePlay.version))
+const iosVersionLabel = computed(() => formatMobileVersion(mobileRelease.value.channels.apple.version))
+const appPurchaseEnabled = computed(() => appAccessMode.value === 'paid')
 const androidDownloadUrl = computed(() => {
   const channel = mobileRelease.value.channels.androidApk
   const selectedUrl = downloadSource.value === 'cloudflare' ? channel.cloudflareUrl : channel.githubUrl
@@ -82,17 +117,17 @@ const appleDownloadUrl = computed(() => {
     ? channel.appStoreUrl
     : channel.testFlightUrl || channel.appStoreUrl
 })
-const harmonyDownloadUrl = computed(() => {
-  const channel = mobileRelease.value.channels.harmony
-  return channel.url
-})
 const appleReleaseLabel = computed(() => {
   const channel = mobileRelease.value.channels.apple
-  if (channel.testFlightUrl && channel.appStoreUrl) return 'TestFlight · App Store'
+  if (appleUsesOfficialRelease.value && channel.appStoreUrl) return 'App Store'
   if (channel.testFlightUrl) return 'TestFlight'
   if (channel.appStoreUrl) return 'App Store'
   return t('connections.app.iosPending')
 })
+
+function formatMobileVersion(version: string): string {
+  return version ? `v${version.replace(/^v/i, '')}` : ''
+}
 const activeAuthorization = computed(() => connectionTab.value === 'lan'
   ? lanAuthorization.value
   : cloudAuthorization.value)
@@ -110,6 +145,15 @@ const remainingTime = computed(() => {
 const accessFailureReason = computed(() => {
   const failure = accessFailure.value
   if (!failure) return ''
+  if (failure.code === 'cloud_subscription_required') {
+    return t('connections.app.accessFailures.cloudSubscriptionRequired')
+  }
+  if (failure.code === 'paid_account_required') {
+    return t('connections.app.accessFailures.paidAccountRequired')
+  }
+  if (failure.code === 'app_access_expired') {
+    return t('connections.app.accessFailures.appAccessExpired')
+  }
   if (failure.plan === 'internal' || failure.plan === 'public_beta') {
     return t('connections.app.accessFailures.tokenExpired')
   }
@@ -132,6 +176,22 @@ const accessFailureMode = computed(() => {
   const plan = accessFailure.value?.plan || 'unknown'
   const knownPlan = plan === 'internal' || plan === 'public_beta' || plan === 'paid' ? plan : 'unknown'
   return t(`connections.app.accessModes.${knownPlan}`)
+})
+const accessFailureTime = computed(() => {
+  const occurredAt = Number(accessFailure.value?.occurredAt || 0)
+  if (!occurredAt) return ''
+  return new Intl.DateTimeFormat(locale.value, {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+  }).format(new Date(occurredAt))
+})
+const accessFailureRequiresPurchase = computed(() => {
+  const failure = accessFailure.value
+  if (!failure) return false
+  if (PURCHASE_REQUIRED_FAILURE_CODES.has(failure.code)) return true
+  return failure.plan === 'paid'
+    && failure.code === 'app_entitlement_expired'
+    && failure.tokenTtlSeconds === 0
 })
 
 const columns = computed<DataTableColumns<AppConnection>>(() => [
@@ -208,6 +268,22 @@ const columns = computed<DataTableColumns<AppConnection>>(() => [
     },
   },
   {
+    title: t('connections.app.pushNotifications'),
+    key: 'push_enabled',
+    width: 120,
+    fixed: 'right',
+    render(row) {
+      return h(NSwitch, {
+        value: row.push_enabled !== false,
+        loading: updatingPushIds.value.has(row.id),
+        disabled: row.can_manage_push === false || updatingPushIds.value.has(row.id),
+        'aria-disabled': row.can_manage_push === false || updatingPushIds.value.has(row.id),
+        'aria-label': t('connections.app.pushForDevice', { name: row.device_name || row.device_code }),
+        onUpdateValue: (value: boolean) => updatePushPreference(row, value),
+      })
+    },
+  },
+  {
     title: t('connections.app.actions'),
     key: 'actions',
     width: 100,
@@ -238,13 +314,27 @@ async function loadConnections(options: { silent?: boolean; detectScanConnection
   if (connectionsRequestInFlight) return
   connectionsRequestInFlight = true
   if (!options.silent) loading.value = true
+  const preferenceRevision = pushPreferenceRevision
   try {
     const response = await fetchAppConnections()
-    connections.value = response.connections
+    connections.value = response.connections.map(row => {
+      // A polling response begun before a toggle must not undo its saved value.
+      const current = connections.value.find(item => item.id === row.id)
+      return current && (preferenceRevision !== pushPreferenceRevision || updatingPushIds.value.has(row.id))
+        ? { ...row, push_enabled: current.push_enabled } : row
+    })
     const nextFailure = response.access_failure || null
-    accessFailure.value = nextFailure && nextFailure.occurredAt > dismissedAccessFailureAt.value
+    const previousFailureAt = Number(accessFailure.value?.occurredAt || 0)
+    const visibleFailure = nextFailure && nextFailure.occurredAt > dismissedAccessFailureAt.value
       ? nextFailure
       : null
+    accessFailure.value = visibleFailure
+    if (visibleFailure && visibleFailure.occurredAt > previousFailureAt && showScanModal.value) {
+      showScanModal.value = false
+      lanAuthorization.value = null
+      cloudAuthorization.value = null
+      qrCodeDataUrls.value = { lan: '', cloud: '' }
+    }
     if (options.detectScanConnection && showScanModal.value) {
       const connected = response.connections.some(connection => (
         connection.active
@@ -303,7 +393,7 @@ async function generateAuthorization(type: 'lan' | 'cloud', refresh = false) {
   try {
     const response = type === 'lan'
       ? await createLanAppAuthorization()
-      : await createCloudAppAuthorization(refresh)
+      : await createCloudAppAuthorization(refresh, cloudRelayRoute.value)
     const dataUrl = await QRCode.toDataURL(response.qr_payload, {
       width: 320,
       margin: 4,
@@ -312,12 +402,45 @@ async function generateAuthorization(type: 'lan' | 'cloud', refresh = false) {
     })
     currentTimestamp.value = Math.floor(Date.now() / 1000)
     if (type === 'lan') lanAuthorization.value = response as LanAppAuthorizationResponse
-    else cloudAuthorization.value = response as CloudAppAuthorizationResponse
+    else {
+      cloudAuthorization.value = response as CloudAppAuthorizationResponse
+      cloudRelayRoute.value = (response as CloudAppAuthorizationResponse).relay_route
+    }
     qrCodeDataUrls.value = { ...qrCodeDataUrls.value, [type]: dataUrl }
   } catch (error: any) {
     message.error(authorizationErrorMessage(error))
   } finally {
     authorizationLoading.value = { ...authorizationLoading.value, [type]: false }
+  }
+}
+
+async function loadCloudRelayRoute(): Promise<void> {
+  try {
+    const status = await fetchAppRelayStatus()
+    cloudRelayRoute.value = status.route || 'official'
+  } catch {
+    cloudRelayRoute.value = 'official'
+  }
+}
+
+async function selectCloudRelayRoute(route: AppRelayRoute): Promise<void> {
+  if (cloudRelayRouteLoading.value || route === cloudRelayRoute.value) return
+  cloudRelayRoute.value = route
+  cloudAuthorization.value = null
+  qrCodeDataUrls.value = { ...qrCodeDataUrls.value, cloud: '' }
+  cloudRelayRouteLoading.value = true
+  try {
+    const status = await updateAppRelayRoute(route)
+    cloudRelayRoute.value = status.route
+    message.success(t('connections.app.routeSwitched'))
+    if (showScanModal.value && connectionTab.value === 'cloud') {
+      await generateAuthorization('cloud')
+    }
+  } catch (error: any) {
+    message.error(error?.message || t('connections.app.routeSwitchFailed'))
+    await loadCloudRelayRoute()
+  } finally {
+    cloudRelayRouteLoading.value = false
   }
 }
 
@@ -339,11 +462,13 @@ function ensureCurrentAuthorization(type: 'lan' | 'cloud', verifyRelaySession = 
 async function loadMobileRelease() {
   try {
     const manifest = await fetchStudioVersionManifest()
+    appAccessMode.value = manifest.accessMode || null
     mobileRelease.value = manifest.mobile
     const android = manifest.mobile.channels.androidApk
     if (!android.cloudflareUrl && android.githubUrl) downloadSource.value = 'github'
     else if (!android.githubUrl && android.cloudflareUrl) downloadSource.value = 'cloudflare'
   } catch {
+    appAccessMode.value = null
     mobileRelease.value = DEFAULT_MOBILE_RELEASE
   }
 }
@@ -373,13 +498,27 @@ async function generateDownloadQrCode(channel: DownloadQrChannel, requestedUrl: 
 function downloadUrlFor(channel: DownloadQrChannel): string {
   if (channel === 'androidApk') return androidDownloadUrl.value
   if (channel === 'googlePlay') return googlePlayDownloadUrl.value
-  if (channel === 'apple') return appleDownloadUrl.value
-  return harmonyDownloadUrl.value
+  return appleDownloadUrl.value
 }
 
 function generateDownloadQrCodes(): void {
-  const channels: DownloadQrChannel[] = ['androidApk', 'googlePlay', 'apple', 'harmony']
+  const channels: DownloadQrChannel[] = ['androidApk', 'googlePlay', 'apple']
   for (const channel of channels) void generateDownloadQrCode(channel, downloadUrlFor(channel))
+}
+
+async function updatePushPreference(connection: AppConnection, enabled: boolean) {
+  if (updatingPushIds.value.has(connection.id)) return
+  updatingPushIds.value.add(connection.id)
+  pushPreferenceRevision++
+  try {
+    const response = await updateAppConnectionPush(connection.id, enabled)
+    connections.value = connections.value.map(row => row.id === connection.id ? { ...row, push_enabled: response.push_enabled } : row)
+  } catch (error: any) {
+    message.error(error?.message || t('connections.app.pushUpdateFailed'))
+  } finally {
+    pushPreferenceRevision++
+    updatingPushIds.value.delete(connection.id)
+  }
 }
 
 async function deleteConnection(connection: AppConnection) {
@@ -405,17 +544,35 @@ function openScanModal() {
   ensureCurrentAuthorization('lan')
 }
 
+function updatePanelView(view: AppPanelView): void {
+  panelView.value = view
+  void router.replace({
+    query: {
+      ...route.query,
+      view: view === 'download' ? undefined : view,
+    },
+  })
+}
+
+watch(
+  () => route.query.view,
+  value => {
+    panelView.value = normalizePanelView(value)
+  },
+)
+
 watch(connectionTab, (type) => {
   ensureCurrentAuthorization(type, type === 'cloud')
 })
 
 watch(
-  [androidDownloadUrl, googlePlayDownloadUrl, appleDownloadUrl, harmonyDownloadUrl],
+  [androidDownloadUrl, googlePlayDownloadUrl, appleDownloadUrl],
   generateDownloadQrCodes,
 )
 
 onMounted(() => {
   void loadConnections()
+  void loadCloudRelayRoute()
   void loadMobileRelease()
   generateDownloadQrCodes()
   countdownTimer = setInterval(() => {
@@ -447,7 +604,7 @@ onUnmounted(() => {
             class="view-switch-button"
             :class="{ 'view-switch-button--active': panelView === 'list' }"
             :aria-selected="panelView === 'list'"
-            @click="panelView = 'list'"
+            @click="updatePanelView('list')"
           >
             {{ t('connections.app.viewList') }}
           </button>
@@ -456,7 +613,7 @@ onUnmounted(() => {
             class="view-switch-button"
             :class="{ 'view-switch-button--active': panelView === 'download' }"
             :aria-selected="panelView === 'download'"
-            @click="panelView = 'download'"
+            @click="updatePanelView('download')"
           >
             {{ t('connections.app.viewDownload') }}
           </button>
@@ -467,25 +624,59 @@ onUnmounted(() => {
       </div>
     </header>
 
+    <NAlert
+      v-if="accessFailure"
+      class="app-access-failure"
+      type="error"
+      :title="t('connections.app.accessFailureTitle')"
+      :bordered="false"
+      closable
+      @close="dismissAccessFailure"
+    >
+      <div class="app-access-failure__reason">{{ accessFailureReason }}</div>
+      <div class="app-access-failure__meta">
+        <span>{{ t('connections.app.accessFailureMode', { mode: accessFailureMode }) }}</span>
+        <span v-if="accessFailure.deviceName">
+          {{ t('connections.app.accessFailureDeviceName', { deviceName: accessFailure.deviceName }) }}
+        </span>
+        <span>{{ t('connections.app.accessFailureTime', { time: accessFailureTime }) }}</span>
+      </div>
+      <div v-if="accessFailureRequiresPurchase" class="app-access-failure__actions">
+        <NButton
+          tag="a"
+          :href="APP_ACCESS_PURCHASE_URL"
+          target="_blank"
+          rel="noopener noreferrer"
+          size="small"
+          type="primary"
+        >
+          {{ t('connections.app.purchaseAccess') }}
+        </NButton>
+      </div>
+    </NAlert>
+
     <template v-if="panelView === 'list'">
-      <NAlert
-        v-if="accessFailure"
-        class="app-access-failure"
-        type="error"
-        :title="t('connections.app.accessFailureTitle')"
-        :bordered="false"
-        closable
-        @close="dismissAccessFailure"
-      >
-        <div class="app-access-failure__reason">{{ accessFailureReason }}</div>
-        <div class="app-access-failure__meta">
-          <span>{{ t('connections.app.accessFailureMode', { mode: accessFailureMode }) }}</span>
-          <span v-if="accessFailure.deviceName">
-            {{ t('connections.app.accessFailureDeviceName', { deviceName: accessFailure.deviceName }) }}
-          </span>
-          <span>{{ t('connections.app.accessFailureTime', { time: new Date(accessFailure.occurredAt).toLocaleString() }) }}</span>
+      <div class="cloud-route-setting">
+        <div class="cloud-route-copy">
+          <strong>{{ t('connections.app.routeTitle') }}</strong>
+          <span>{{ t('connections.app.routeDescription') }}</span>
         </div>
-      </NAlert>
+        <div class="cloud-route-options" role="radiogroup" :aria-label="t('connections.app.routeTitle')">
+          <button
+            v-for="option in APP_RELAY_ROUTE_OPTIONS"
+            :key="option.value"
+            type="button"
+            class="cloud-route-option"
+            :class="{ 'cloud-route-option--active': cloudRelayRoute === option.value }"
+            :disabled="cloudRelayRouteLoading"
+            :aria-checked="cloudRelayRoute === option.value"
+            role="radio"
+            @click="selectCloudRelayRoute(option.value)"
+          >
+            <span>{{ t(option.label) }}</span>
+          </button>
+        </div>
+      </div>
 
       <div class="app-connections-table">
         <NDataTable
@@ -496,7 +687,7 @@ onUnmounted(() => {
           bordered
           :single-line="false"
           :row-key="(row: AppConnection) => row.id"
-          :scroll-x="1370"
+          :scroll-x="1490"
           flex-height
         >
           <template #empty>
@@ -506,7 +697,7 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <div v-else class="app-downloads">
+    <div v-else-if="panelView === 'download'" class="app-downloads">
       <div class="app-download-layout">
         <section class="app-download-hero">
           <div class="app-download-intro">
@@ -515,14 +706,27 @@ onUnmounted(() => {
                 <img src="/logo.png" alt="">
               </div>
               <div>
-                <span>HStudio Mobile</span>
+                <span>Ekko Studio Mobile</span>
                 <h3>{{ t('connections.app.downloadTitle') }}</h3>
               </div>
             </div>
-            <p>{{ t('connections.app.downloadDescription') }}</p>
+            <p>{{ t(appPurchaseEnabled ? 'connections.app.downloadPaidDescription' : 'connections.app.downloadDescription') }}</p>
+            <NButton
+              v-if="appPurchaseEnabled"
+              class="app-download-purchase"
+              tag="a"
+              :href="APP_ACCESS_PURCHASE_URL"
+              target="_blank"
+              rel="noopener noreferrer"
+              size="small"
+              type="primary"
+            >
+              {{ t('connections.app.purchaseAccess') }}
+            </NButton>
             <div class="app-download-meta">
-              <span>{{ mobileVersionLabel }}</span>
-              <span>Android · iOS · HarmonyOS</span>
+              <span>APK {{ androidVersionLabel }}</span>
+              <span>Google Play {{ googlePlayVersionLabel }}</span>
+              <span>iOS {{ iosVersionLabel }}</span>
             </div>
           </div>
 
@@ -676,44 +880,11 @@ onUnmounted(() => {
             <NButton v-else class="app-platform-action" disabled>{{ t('connections.app.notReleased') }}</NButton>
           </article>
 
-          <article
-            class="app-platform-card"
-            :class="harmonyDownloadUrl ? 'app-platform-card--available' : 'app-platform-card--pending'"
-          >
-            <div class="app-platform-card-header">
-              <div class="app-platform-icon" aria-hidden="true">
-                <svg data-platform-icon="harmony" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55">
-                  <circle cx="12" cy="12" r="8.5" />
-                  <path d="M7.5 14.5c1.4-3.8 7.6-3.8 9 0M9.2 9.5h.01M14.8 9.5h.01" />
-                </svg>
-              </div>
-              <NTag v-if="harmonyDownloadUrl && !mobileRelease.channels.harmony.online" class="download-test-status" size="small" type="warning" :bordered="false">
-                {{ t('connections.app.testVersion') }}
-              </NTag>
-              <div v-if="harmonyDownloadUrl" class="download-tag-qr">
-                <img v-if="downloadQrCodeDataUrls.harmony" :src="downloadQrCodeDataUrls.harmony" :alt="t('connections.app.downloadScan')">
-                <NSpin v-else size="small" />
-              </div>
-              <NTag v-else size="small" :bordered="false">{{ t('connections.app.notReleased') }}</NTag>
-            </div>
-            <div class="app-platform-copy">
-              <h4>HarmonyOS</h4>
-              <p>{{ mobileRelease.channels.harmony.online ? 'HarmonyOS' : t('connections.app.harmonyPending') }}</p>
-            </div>
-            <NButton
-              v-if="harmonyDownloadUrl"
-              class="app-platform-action"
-              tag="a"
-              type="primary"
-              :href="mobileRelease.channels.harmony.url"
-              target="_blank"
-              rel="noopener noreferrer"
-            >HarmonyOS</NButton>
-            <NButton v-else class="app-platform-action" disabled>{{ t('connections.app.notReleased') }}</NButton>
-          </article>
         </div>
       </div>
     </div>
+
+    <SocialMessagesView v-else embedded class="app-message-push" />
   </section>
 
   <NModal
@@ -766,6 +937,27 @@ onUnmounted(() => {
 
       <NTabPane name="cloud" :tab="t('connections.app.cloudConnection')">
         <div class="connection-pane">
+          <div class="cloud-route-setting cloud-route-setting--qr">
+            <div class="cloud-route-copy">
+              <strong>{{ t('connections.app.routeTitle') }}</strong>
+              <span>{{ t('connections.app.qrRouteDescription') }}</span>
+            </div>
+            <div class="cloud-route-options" role="radiogroup" :aria-label="t('connections.app.routeTitle')">
+              <button
+                v-for="option in APP_RELAY_ROUTE_OPTIONS"
+                :key="option.value"
+                type="button"
+                class="cloud-route-option"
+                :class="{ 'cloud-route-option--active': cloudRelayRoute === option.value }"
+                :disabled="cloudRelayRouteLoading || authorizationLoading.cloud"
+                :aria-checked="cloudRelayRoute === option.value"
+                role="radio"
+                @click="selectCloudRelayRoute(option.value)"
+              >
+                <span>{{ t(option.label) }}</span>
+              </button>
+            </div>
+          </div>
           <NSpin v-if="authorizationLoading.cloud && !cloudAuthorization" size="small" />
 
           <template v-else-if="cloudAuthorization">
@@ -815,6 +1007,81 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+.cloud-route-setting {
+  flex: 0 0 auto;
+  margin: 12px 20px 0;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid $border-light;
+  border-radius: 10px;
+  background: rgba(var(--bg-card-rgb), 0.7);
+}
+
+.cloud-route-setting--qr {
+  width: 100%;
+  margin: 0 0 16px;
+  box-sizing: border-box;
+}
+
+.cloud-route-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  strong {
+    color: $text-primary;
+    font-size: 13px;
+    font-weight: 650;
+  }
+
+  span {
+    color: $text-muted;
+    font-size: 11px;
+    line-height: 16px;
+  }
+}
+
+.cloud-route-options {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.cloud-route-option {
+  min-width: 138px;
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  color: $text-secondary;
+  border: 1px solid $border-light;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color $transition-fast, background-color $transition-fast, color $transition-fast;
+
+  span {
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  &:disabled {
+    cursor: wait;
+    opacity: 0.6;
+  }
+}
+
+.cloud-route-option--active {
+  color: $accent-primary;
+  border-color: rgba(var(--accent-primary-rgb), 0.48);
+  background: rgba(var(--accent-primary-rgb), 0.08);
 }
 
 .panel-header {
@@ -920,6 +1187,11 @@ onUnmounted(() => {
   background: linear-gradient(180deg, rgba(var(--accent-primary-rgb), 0.025), transparent 52%);
 }
 
+.app-message-push {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .app-download-layout {
   width: 100%;
   max-width: 1180px;
@@ -972,6 +1244,10 @@ onUnmounted(() => {
     font-size: 14px;
     line-height: 22px;
   }
+}
+
+.app-download-purchase {
+  margin-top: 14px;
 }
 
 .app-download-brand {
@@ -1053,7 +1329,7 @@ onUnmounted(() => {
 
 .app-platform-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1199,6 +1475,11 @@ onUnmounted(() => {
     color: $text-muted;
     font-size: 12px;
   }
+
+  &__actions {
+    margin-top: 10px;
+    display: flex;
+  }
 }
 
 .connection-pane {
@@ -1272,6 +1553,22 @@ onUnmounted(() => {
 }
 
 @media (max-width: $breakpoint-mobile) {
+  .cloud-route-setting {
+    margin: 12px 12px 0;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .cloud-route-setting--qr {
+    margin: 0 0 12px;
+  }
+
+  .cloud-route-option {
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
   .panel-header {
     align-items: flex-start;
     flex-direction: column;

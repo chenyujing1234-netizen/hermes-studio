@@ -1,22 +1,28 @@
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   closeGlobalEkkoAgent,
   createGlobalEkkoAgent,
+  getGlobalEkkoAgent,
   GlobalEkkoAgent,
   setupGlobalEkkoAgent,
-} from '../../packages/server/src/services/ekko-agent/manager'
-import { EkkoFileLogReader, setupEkkoAgent } from '../../packages/ekko-agent/src'
+} from '../../packages/server/src/modules/ekko/services/manager'
+import { DEFAULT_EKKO_JEV_CONFIG, EkkoFileLogReader, noul, setupEkkoAgent } from '../../packages/ekko-agent/src'
 import type { EkkoAgentSetup, ModelClient, ModelRequest } from '../../packages/ekko-agent/src'
 
 const getHermesBaseDirMock = vi.hoisted(() => vi.fn())
+const getJevRuntimeConfigMock = vi.hoisted(() => vi.fn())
 
-vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
-  getHermesBaseDir: getHermesBaseDirMock,
-  listProfileNamesFromDisk: vi.fn(() => ['default']),
+vi.mock('../../packages/server/src/modules/studio/public/jev', () => ({
+  getJevRuntimeConfig: getJevRuntimeConfigMock,
+}))
+
+vi.mock('../../packages/server/src/modules/studio/public/profile-config', () => ({
+  getProfilesBaseDir: getHermesBaseDirMock,
+  listProfileNames: vi.fn(() => ['default']),
 }))
 
 let baseDirectory = ''
@@ -26,10 +32,12 @@ beforeEach(async () => {
   baseDirectory = await mkdtemp(join(tmpdir(), 'global-ekko-agent-'))
   setups = []
   getHermesBaseDirMock.mockReturnValue(join(baseDirectory, 'hermes'))
+  getJevRuntimeConfigMock.mockReset().mockResolvedValue({ ...DEFAULT_EKKO_JEV_CONFIG })
 })
 
 afterEach(async () => {
   vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
   closeGlobalEkkoAgent()
   for (const setup of setups) setup.close()
   await rm(baseDirectory, { recursive: true, force: true })
@@ -71,10 +79,82 @@ function modelClient(content: string): ModelClient {
 }
 
 describe('GlobalEkkoAgent', () => {
+  it('passes current Profile JEV settings to Ekko without overwriting its persisted defaults', async () => {
+    const setup = createTestSetup(['work', 'personal'])
+    setup.config.update({ skills: { enabled: false }, jev: { enabled: true, memoryEnabled: true, skillsEnabled: true, apiKey: 'ekko-local-key' } })
+    const before = await readFile(setup.layout.configPath, 'utf8')
+    const createRuntime = vi.spyOn(setup, 'createRuntime')
+    getJevRuntimeConfigMock.mockImplementation(async profile => ({
+      ...DEFAULT_EKKO_JEV_CONFIG, enabled: true, memoryEnabled: profile === 'personal', skillsEnabled: profile === 'personal', apiKey: `studio-${profile}`, model: `jev-${profile}`,
+    }))
+    const work = createGlobalEkkoAgent({ setup, profile: 'work', memory: false })
+    const personal = createGlobalEkkoAgent({ setup, profile: 'personal', memory: false })
+    await work.run({ messages: ['first'], modelClient: modelClient('work') })
+    await personal.run({ messages: ['second'], modelClient: modelClient('personal') })
+    expect(createRuntime.mock.calls[0][0]?.jev).toMatchObject({ apiKey: 'studio-work' })
+    expect(createRuntime.mock.calls[1][0]?.jev).toMatchObject({ apiKey: 'studio-personal' })
+    const workRuntime = createRuntime.mock.results[0].value
+    const personalRuntime = createRuntime.mock.results[1].value
+    expect(workRuntime.jev).not.toBe(personalRuntime.jev)
+    expect(workRuntime.jev.settings.model).toBe('jev-work')
+    expect(personalRuntime.jev.settings.model).toBe('jev-personal')
+    expect(workRuntime.jev.settings.memoryEnabled).toBe(false)
+    expect(personalRuntime.jev.settings.memoryEnabled).toBe(true)
+    expect(workRuntime.jev.settings.skillsEnabled).toBe(false)
+    expect(personalRuntime.jev.settings.skillsEnabled).toBe(true)
+    // The cached runtime picks up edits before the next run.
+    getJevRuntimeConfigMock.mockResolvedValue({ ...DEFAULT_EKKO_JEV_CONFIG, enabled: true, memoryEnabled: true, apiKey: 'edited-key', model: 'jev-edited',
+      skillsEnabled: true, skillsCandidateLimit: 9, skillsMinConfidence: 0.95, skillsTimeoutMs: 1100,
+      memoryKindRoutingEnabled: true, memoryRerankEnabled: true, memoryWriteReviewEnabled: true,
+      memoryRelevanceFilterEnabled: true, memoryFilterMinConfidence: 0.9, memoryCandidateLimit: 7, memoryMinConfidence: 0.95, memoryTimeoutMs: 1200 })
+    await work.run({ messages: ['again'], modelClient: modelClient('updated') })
+    expect(createRuntime).toHaveBeenCalledTimes(2)
+    expect(workRuntime.jev.settings.model).toBe('jev-edited')
+    expect(workRuntime.jev.settings).toMatchObject({ skillsEnabled: true, skillsCandidateLimit: 9, skillsMinConfidence: 0.95, skillsTimeoutMs: 1100 })
+    expect(workRuntime.jev.settings).toMatchObject({ memoryKindRoutingEnabled: true, memoryRerankEnabled: true,
+      memoryWriteReviewEnabled: true, memoryRelevanceFilterEnabled: true, memoryFilterMinConfidence: 0.9, memoryCandidateLimit: 7, memoryMinConfidence: 0.95, memoryTimeoutMs: 1200 })
+    expect(workRuntime.jev.settings.memoryEnabled).toBe(true)
+    expect(personalRuntime.jev.settings.model).toBe('jev-personal')
+    getJevRuntimeConfigMock.mockResolvedValue({ ...DEFAULT_EKKO_JEV_CONFIG, enabled: true, apiKey: 'edited-key', model: 'jev-edited', memoryEnabled: false })
+    await work.run({ messages: ['memory JEV off'], modelClient: modelClient('continued') })
+    expect(workRuntime.jev.settings.memoryEnabled).toBe(false)
+    expect(workRuntime.jev.settings.skillsEnabled).toBe(false)
+    expect(personalRuntime.jev.settings.skillsEnabled).toBe(true)
+    expect(workRuntime.jev.available).toBe(true)
+    expect(personalRuntime.jev.settings.memoryEnabled).toBe(true)
+    // Removing Studio's key explicitly disables JEV instead of falling back to Ekko's local key.
+    getJevRuntimeConfigMock.mockResolvedValue({ ...DEFAULT_EKKO_JEV_CONFIG })
+    await work.run({ messages: ['no JEV'], modelClient: modelClient('normal response') })
+    expect(workRuntime.jev.available).toBe(false)
+    expect(workRuntime.jev.settings.memoryEnabled).toBe(false)
+    expect(await readFile(setup.layout.configPath, 'utf8')).toBe(before)
+  })
+
+  it('passes Profile JEV settings into isolated runs and degrades config read failures', async () => {
+    const setup = createTestSetup(['work'])
+    const createRuntime = vi.spyOn(setup, 'createRuntime')
+    const agent = createGlobalEkkoAgent({ setup, profile: 'work', memory: false })
+    getJevRuntimeConfigMock.mockResolvedValue({ ...DEFAULT_EKKO_JEV_CONFIG, enabled: true, memoryEnabled: true, apiKey: 'isolated-key' })
+    await agent.runIsolated({ modelClient: modelClient('isolated') }, { messages: ['isolated'] })
+    expect(createRuntime.mock.calls[0][0]?.jev).toMatchObject({ enabled: true, memoryEnabled: true, apiKey: 'isolated-key' })
+    getJevRuntimeConfigMock.mockRejectedValue(new Error('private configuration details'))
+    await expect(agent.run({ messages: ['continue'], modelClient: modelClient('continued') }))
+      .resolves.toMatchObject({ output: { content: 'continued' } })
+    const runtime = createRuntime.mock.results[1].value
+    const upstream = vi.fn()
+    vi.stubGlobal('fetch', upstream)
+    expect(await runtime.jev.evaluate({ state: null, questions: { ok: noul('OK?') } })).toBeUndefined()
+    expect(upstream).not.toHaveBeenCalled()
+  })
+
   it('sets up global directories and the memory database before any agent run', () => {
     const setup = setupGlobalEkkoAgent({
       baseDirectory,
       profiles: ['default', 'work'],
+      config: {
+        runtime: { maxSteps: 48 },
+        compression: { threshold: 0.65 },
+      },
       env: { NODE_ENV: 'test' },
     })
 
@@ -84,6 +164,88 @@ describe('GlobalEkkoAgent', () => {
     expect(existsSync(join(baseDirectory, '.ekko', 'logs', 'work'))).toBe(true)
     expect(existsSync(join(baseDirectory, '.ekko', 'workspace', 'work'))).toBe(true)
     expect(setup.memory.isEnabled).toBe(true)
+    expect(setup.config.read()).toMatchObject({
+      runtime: { maxSteps: 48 },
+      compression: { threshold: 0.65 },
+    })
+  })
+
+  it('automatically reopens persistent storage after a repaired fallback database', async () => {
+    const ekkoRoot = join(baseDirectory, '.ekko')
+    const databasePath = join(ekkoRoot, 'ekko.db')
+    const initial = setupEkkoAgent({ baseDirectory, env: { NODE_ENV: 'test' } })
+    initial.close()
+    await rm(databasePath)
+    await mkdir(databasePath, { recursive: true })
+    await chmod(ekkoRoot, 0o500)
+
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const degradedSetup = setupGlobalEkkoAgent({
+      baseDirectory,
+      profiles: ['default'],
+      env: { NODE_ENV: 'test' },
+    })
+    const degradedAgent = getGlobalEkkoAgent()
+    const repairClient = modelClient('database repaired automatically')
+
+    try {
+      expect(degradedSetup.database.databasePath).toBe(':memory:')
+      await chmod(ekkoRoot, 0o700)
+      await rm(databasePath, { recursive: true })
+
+      await expect(degradedAgent.run({
+        messages: ['Repair the persistent database.'],
+        modelClient: repairClient,
+      })).resolves.toMatchObject({ output: { content: 'database repaired automatically' } })
+      expect(vi.mocked(repairClient.create).mock.calls[0]?.[0]).toMatchObject({
+        toolChoice: undefined,
+      })
+
+      const recoveredSetup = setupGlobalEkkoAgent()
+      const recoveredAgent = getGlobalEkkoAgent()
+      expect(recoveredSetup).not.toBe(degradedSetup)
+      expect(recoveredAgent).not.toBe(degradedAgent)
+      expect(recoveredSetup.database.databasePath).toBe(databasePath)
+      expect(recoveredSetup.recovery.snapshot()).toMatchObject({
+        status: 'ok',
+        capabilities: {
+          database: {
+            activeStorage: 'persistent',
+            targetReady: true,
+            restartRequired: false,
+          },
+        },
+      })
+
+      await expect(recoveredAgent.run({
+        messages: ['Continue after recovery.'],
+        modelClient: modelClient('persistent again'),
+      })).resolves.toMatchObject({ output: { content: 'persistent again' } })
+      expect(recoveredAgent.status()).toMatchObject({ memoryDatabasePath: databasePath })
+    } finally {
+      await chmod(ekkoRoot, 0o700)
+      warning.mockRestore()
+    }
+  })
+
+  it('accepts a config patch when creating a Studio global agent', () => {
+    const agent = createGlobalEkkoAgent({
+      setup: createTestSetup(),
+      memory: false,
+      config: {
+        compression: {
+          enabled: false,
+          threshold: 0.75,
+          protectLastN: 8,
+        },
+        prompt: { instructions: ['Studio global instruction.'] },
+      },
+    })
+
+    expect(agent.readConfig()).toMatchObject({
+      compression: { enabled: false, threshold: 0.75, protectLastN: 8 },
+      prompt: { instructions: ['Studio global instruction.'] },
+    })
   })
 
   it('is created once and handles repeated runs through the same runtime', async () => {
@@ -100,6 +262,21 @@ describe('GlobalEkkoAgent', () => {
     expect(firstClient.create).toHaveBeenCalledTimes(1)
     expect(secondClient.create).toHaveBeenCalledTimes(1)
     expect(existsSync(join(baseDirectory, '.ekko', 'skills', 'default'))).toBe(true)
+  })
+
+  it('recreates the cached runtime after settings change', async () => {
+    const setup = createTestSetup()
+    const createRuntime = vi.spyOn(setup, 'createRuntime')
+    const agent = createGlobalEkkoAgent({ setup, memory: false })
+
+    await agent.run({ messages: ['first'], modelClient: modelClient('first') })
+    expect(createRuntime).toHaveBeenCalledTimes(1)
+    setup.config.update({ logging: { maxBytes: 2_048 } })
+    expect(agent.refreshRuntime()).toBe('refreshed')
+    await agent.run({ messages: ['second'], modelClient: modelClient('second') })
+
+    expect(createRuntime).toHaveBeenCalledTimes(2)
+    expect(createRuntime.mock.calls[1]?.[0]?.logWriter).toMatchObject({ maxBytes: 2_048 })
   })
 
   it('exposes the runtime-owned boundary interrupt without creating queue policy', async () => {
@@ -139,7 +316,7 @@ describe('GlobalEkkoAgent', () => {
     })
   })
 
-  it('imports Hermes profile skills when the Ekko skills root does not exist', async () => {
+  it('does not import Hermes profile skills when the Ekko skills root does not exist', async () => {
     const hermesRoot = join(baseDirectory, 'hermes')
     await mkdir(join(hermesRoot, 'skills', 'default-skill'), { recursive: true })
     await mkdir(join(hermesRoot, 'profiles', 'work', 'skills', 'work-skill'), { recursive: true })
@@ -148,8 +325,10 @@ describe('GlobalEkkoAgent', () => {
 
     const agent = createTestAgent({ memory: false, profile: 'work' })
     try {
-      expect(existsSync(join(baseDirectory, '.ekko', 'skills', 'default', 'default-skill', 'SKILL.md'))).toBe(true)
-      expect(existsSync(join(baseDirectory, '.ekko', 'skills', 'work', 'work-skill', 'SKILL.md'))).toBe(true)
+      expect(existsSync(join(baseDirectory, '.ekko', 'skills', 'default', 'default-skill'))).toBe(false)
+      expect(existsSync(join(baseDirectory, '.ekko', 'skills', 'work', 'work-skill'))).toBe(false)
+      expect(existsSync(join(hermesRoot, 'skills', 'default-skill', 'SKILL.md'))).toBe(true)
+      expect(existsSync(join(hermesRoot, 'profiles', 'work', 'skills', 'work-skill', 'SKILL.md'))).toBe(true)
     } finally {
       agent.close()
     }

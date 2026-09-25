@@ -25,8 +25,15 @@ const routeProfile = computed(() => {
 })
 
 const isStandaloneChat = computed(() => route.meta?.standaloneChat === true)
-const isConnectionsPage = computed(() => route.name === 'hermes.connections')
-const productTitle = 'Hermes Studio'
+type ChatContentMode = 'chat' | 'connections' | 'agents' | 'models'
+
+const contentMode = computed<ChatContentMode>(() => {
+  if (route.name === 'hermes.connections') return 'connections'
+  if (route.name === 'hermes.agentManager') return 'agents'
+  if (route.name === 'hermes.models') return 'models'
+  return 'chat'
+})
+const productTitle = 'Ekko Studio'
 const tabTitle = computed(() => {
   if (route.name !== 'hermes.session' && route.name !== 'desktop.chat') return productTitle
   return chatStore.activeSession?.title?.trim() || productTitle
@@ -92,7 +99,7 @@ watch([routeSessionId, routeProfile], async ([sessionId]) => {
   <div class="chat-view" :class="{ 'chat-view--standalone': isStandaloneChat }">
     <ChatPanel
       :standalone="isStandaloneChat"
-      :content-mode="isConnectionsPage ? 'connections' : 'chat'"
+      :content-mode="contentMode"
     />
   </div>
 </template>

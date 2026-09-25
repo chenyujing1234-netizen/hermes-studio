@@ -11,6 +11,8 @@ const fetchSkillsMock = vi.hoisted(() => vi.fn())
 const fetchSkillBundlesMock = vi.hoisted(() => vi.fn())
 const deleteSkillBundleApiMock = vi.hoisted(() => vi.fn())
 const dialogWarningMock = vi.hoisted(() => vi.fn())
+const setSessionPushEnabledMock = vi.hoisted(() => vi.fn())
+const messageWarningMock = vi.hoisted(() => vi.fn())
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({ t: (key: string) => key }),
@@ -20,7 +22,11 @@ vi.mock('naive-ui', () => ({
   NButton: { template: '<button type="button" v-bind="$attrs"><slot /><slot name="icon" /></button>' },
   NTooltip: { template: '<div><slot name="trigger" /><slot /></div>' },
   NSwitch: { template: '<button type="button"></button>' },
-  NDropdown: { template: '<div><slot /></div>' },
+  NDropdown: {
+    props: ['options'],
+    emits: ['select'],
+    template: '<div class="dropdown-stub"><button v-for="option in options" :key="option.key" class="dropdown-option" @click="$emit(\'select\', option.key)">{{ option.label }}</button><slot /></div>',
+  },
   NModal: { template: '<div><slot /><slot name="footer" /></div>' },
   NInputNumber: { template: '<input />' },
   NPopover: {
@@ -41,12 +47,13 @@ vi.mock('naive-ui', () => ({
       />
     `,
   },
-  useMessage: () => ({ error: vi.fn(), success: vi.fn() }),
+  useMessage: () => ({ error: vi.fn(), success: vi.fn(), warning: messageWarningMock }),
   useDialog: () => ({ warning: dialogWarningMock }),
 }))
 
-vi.mock('@/api/hermes/sessions', () => ({
+vi.mock('@/api/studio/sessions', () => ({
   fetchContextLength: vi.fn().mockResolvedValue(256000),
+  setSessionPushEnabled: setSessionPushEnabledMock,
 }))
 
 vi.mock('@/api/hermes/model-context', () => ({
@@ -107,6 +114,9 @@ describe('ChatInput focusComposer', () => {
     fetchSkillBundlesMock.mockResolvedValue([])
     deleteSkillBundleApiMock.mockReset()
     dialogWarningMock.mockReset()
+    setSessionPushEnabledMock.mockReset()
+    setSessionPushEnabledMock.mockResolvedValue(true)
+    messageWarningMock.mockReset()
   })
 
   it('puts the caret in the message box on a desktop viewport', async () => {
@@ -132,6 +142,18 @@ describe('ChatInput focusComposer', () => {
     await nextTick()
 
     expect(document.activeElement).not.toBe(textarea)
+    wrapper.unmount()
+  })
+
+  it('keeps voice and tool settings without exposing the per-session push setting', () => {
+    const wrapper = mountForSession('session-push-setting', { pushEnabled: true })
+    const options = wrapper.findAll('.dropdown-option').map(button => button.text())
+
+    expect(options).toContain('realtimeVoice.mode')
+    expect(options).toContain('chat.showToolCalls')
+    expect(options).not.toContain('chat.pushEnabled')
+    expect(setSessionPushEnabledMock).not.toHaveBeenCalled()
+    expect(useChatStore().activeSession?.pushEnabled).toBe(true)
     wrapper.unmount()
   })
 })

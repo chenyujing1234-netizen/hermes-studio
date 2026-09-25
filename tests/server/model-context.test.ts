@@ -32,14 +32,14 @@ async function loadModelContext() {
     homedir: () => homeDir,
   }))
   // Mock getDb to return null to avoid "database is locked" errors in parallel tests
-  vi.doMock('../../packages/server/src/db/index', async () => {
-    const actual = await vi.importActual<typeof import('../../packages/server/src/db/index')>('../../packages/server/src/db/index')
+  vi.doMock('../../packages/server/src/modules/studio/infrastructure/database/index', async () => {
+    const actual = await vi.importActual<typeof import('../../packages/server/src/modules/studio/infrastructure/database/index')>('../../packages/server/src/modules/studio/infrastructure/database/index')
     return {
       ...actual,
       getDb: () => null,
     }
   })
-  return import('../../packages/server/src/services/hermes/model-context')
+  return import('../../packages/server/src/modules/hermes/services/models/context')
 }
 
 describe('getModelContextLength', () => {
@@ -49,6 +49,7 @@ describe('getModelContextLength', () => {
 
   afterEach(() => {
     vi.doUnmock('os')
+    vi.doUnmock('../../packages/server/src/modules/studio/public/provider-context')
     if (originalHermesHome === undefined) delete process.env.HERMES_HOME
     else process.env.HERMES_HOME = originalHermesHome
     if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA
@@ -57,6 +58,15 @@ describe('getModelContextLength', () => {
     else process.env.APPDATA = originalAppData
     if (homeDir) rmSync(homeDir, { recursive: true, force: true })
     homeDir = ''
+  })
+
+  it.each([false, true])('prefers the manually edited model window (config file exists: %s)', async withConfig => {
+    if (withConfig) writeConfig('model:\n  default: policy-model\n  provider: test\n  context_length: 256000\n')
+    const readModelContextRecord = vi.fn(() => ({ available: true, row: { context_limit: 80000 } }))
+    vi.doMock('../../packages/server/src/modules/studio/public/provider-context', () => ({ readModelContextRecord }))
+    const { getModelContextLength } = await loadModelContext()
+    expect(getModelContextLength({ profile: 'default', provider: 'test', model: 'policy-model' })).toBe(80000)
+    expect(readModelContextRecord).toHaveBeenCalledWith('default', 'test', 'policy-model')
   })
 
   it('does not borrow a same-named model context from another provider when the configured provider is uncached', async () => {
@@ -72,6 +82,14 @@ describe('getModelContextLength', () => {
     const { getModelContextLength } = await loadModelContext()
 
     expect(getModelContextLength()).toBe(256_000)
+  })
+
+  it('uses a caller-provided fallback only when no model context is configured', async () => {
+    writeConfig(`model:\n  default: grok-4.6\n  provider: custom:grok\n`)
+
+    const { getModelContextLength } = await loadModelContext()
+
+    expect(getModelContextLength({ provider: 'custom:grok', model: 'grok-4.6', fallbackContextLength: 128_000 })).toBe(128_000)
   })
 
   it('does not scan other providers when the configured provider exists without that model', async () => {

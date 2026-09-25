@@ -13,8 +13,8 @@ import {
   scanLanDevices,
   selectLanIPv4Address,
   startLanDiscoveryResponder,
-} from '../../packages/server/src/services/lan-discovery'
-import type { PublicSystemInfo } from '../../packages/server/src/services/system-info'
+} from '../../packages/server/src/modules/studio/services/network/lan-discovery'
+import type { PublicSystemInfo } from '../../packages/server/src/modules/studio/public/system-info'
 
 const fakeKeyPair = generateKeyPairSync('ed25519', {
   publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -232,10 +232,10 @@ describe('LAN discovery', () => {
   })
 
   it('registers device request routes before auth and device management routes behind super admin auth', () => {
-    const source = readFileSync('packages/server/src/routes/index.ts', 'utf8')
-    const deviceRoutesSource = readFileSync('packages/server/src/routes/devices.ts', 'utf8')
-    const mcuDeviceRoutesSource = readFileSync('packages/server/src/routes/mcu-devices.ts', 'utf8')
-    const bootstrapSource = readFileSync('packages/server/src/index.ts', 'utf8')
+    const source = readFileSync('packages/server/src/bootstrap/routes.ts', 'utf8')
+    const deviceRoutesSource = readFileSync('packages/server/src/modules/studio/routes/devices.ts', 'utf8')
+    const mcuDeviceRoutesSource = readFileSync('packages/server/src/modules/studio/routes/mcu-devices.ts', 'utf8')
+    const bootstrapSource = readFileSync('packages/server/src/bootstrap/http.ts', 'utf8')
 
     const authIndex = source.indexOf('authMiddleware.forEach')
     const publicDeviceIndex = source.indexOf('app.use(devicePublicRoutes.routes())')
@@ -261,7 +261,7 @@ describe('LAN discovery', () => {
   })
 
   it('keeps LAN peer terminals bounded and idle-reclaimable', () => {
-    const peerSocketSource = readFileSync('packages/server/src/services/lan-peer-socket.ts', 'utf8')
+    const peerSocketSource = readFileSync('packages/server/src/modules/studio/services/network/lan-peer-socket.ts', 'utf8')
 
     expect(peerSocketSource).toContain("boundedEnvInt('HERMES_LAN_PEER_MAX_TERMINALS', 4")
     expect(peerSocketSource).toContain("boundedEnvInt('HERMES_LAN_PEER_TERMINAL_IDLE_MS', 10 * 60 * 1000")
@@ -272,16 +272,16 @@ describe('LAN discovery', () => {
   })
 
   it('exposes an MCP terminal list tool so agents can recover forgotten terminal ids', () => {
-    const mcpSource = readFileSync('bin/hermes-studio-mcp.mjs', 'utf8')
+    const mcpSource = readFileSync('bin/ekko-studio-mcp.mjs', 'utf8')
 
-    expect(mcpSource).toContain("name: 'hermes_studio_lan_devices_list'")
+    expect(mcpSource).toContain("name: 'ekko_studio_lan_devices_list'")
     expect(mcpSource).toContain('online status')
     expect(mcpSource).toContain('temporary profile token')
     expect(mcpSource).toContain("'X-Hermes-Profile': profile")
     expect(mcpSource).toContain('token: args.token')
     expect(mcpSource).toContain('profile: args.profile')
     expect(mcpSource).toContain("join(appHome(), 'profiles', segment, '.model-run-token')")
-    expect(mcpSource).toContain("name: 'hermes_studio_lan_terminal_list'")
+    expect(mcpSource).toContain("name: 'ekko_studio_lan_terminal_list'")
     expect(mcpSource).toContain('/terminals`, withAuthArgs(args))')
   })
 })

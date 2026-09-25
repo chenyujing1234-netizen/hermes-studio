@@ -36,6 +36,22 @@ const rawMessages: Record<string, Record<string, unknown>> = {
 }
 
 const messages: Record<string, Record<string, unknown>> = {}
+
+it('defines task plan dynamic statuses and progress placeholders in every raw locale', () => {
+  const keys = ['title', 'progress', 'pending', 'in_progress', 'completed', 'running', 'ended', 'interrupted', 'failed']
+  for (const locale of supportedLocales) {
+    const plan = rawMessages[locale].taskPlan as Record<string, string>
+    expect(plan, locale).toBeDefined()
+    expect(Object.keys(plan).sort(), locale).toEqual([...keys].sort())
+    for (const key of keys) {
+      expect(typeof plan[key], `${locale}: ${key}`).toBe('string')
+      expect(plan[key].trim(), `${locale}: ${key}`).not.toBe('')
+      if (locale !== 'en') expect(plan[key], `${locale}: ${key} copies English`).not.toBe(en.taskPlan[key as keyof typeof en.taskPlan])
+    }
+    expect(interpolationNames(plan.progress), locale).toEqual(['completed', 'total'])
+  }
+})
+
 for (const [locale, localeMessages] of Object.entries(rawMessages)) {
   messages[locale] = locale === 'en'
     ? localeMessages
@@ -107,6 +123,22 @@ function flattenLeafPaths(value: unknown, prefix = ''): Map<string, string> {
 function interpolationNames(value: string): string[] {
   return [...value.matchAll(/\{([^}]+)\}/g)].map(match => match[1]).sort()
 }
+
+it('localizes all JEV messages and error codes without relying on English fallback', () => {
+  const expected = flattenLeafPaths(en.jev)
+  for (const locale of supportedLocales) {
+    const actual = flattenLeafPaths(rawMessages[locale].jev)
+    expect([...actual.keys()].sort(), locale).toEqual([...expected.keys()].sort())
+    const i18n = createI18n({ legacy: false, locale, messages: { [locale]: rawMessages[locale] } })
+    for (const [key, english] of expected) {
+      const value = actual.get(key)!
+      expect(value.trim(), `${locale}: jev.${key}`).not.toBe('')
+      expect(interpolationNames(value), `${locale}: jev.${key}`).toEqual(interpolationNames(english))
+      expect(() => i18n.global.t(`jev.${key}`, { model: 'jev-test', duration: '123' })).not.toThrow()
+      if (locale !== 'en') expect(value, `${locale}: jev.${key} copies English`).not.toBe(english)
+    }
+  }
+})
 
 const SKILLS_USAGE_LOCALIZED_KEYS = [
   'sidebar.skillsUsage',
@@ -376,7 +408,6 @@ function labelLength(value: unknown): number {
 
 describe('i18n locale coverage', () => {
   const ALLOWED_MISSING_KEYS = new Set([
-    'changelog.new_0_5_4_7',
     'chat.sessionNotFound',
   ])
 

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { readCodingAgentConfigFile } from '../../packages/server/src/services/coding-agents'
+import { readCodingAgentConfigFile } from '../../packages/server/src/bootstrap/coding-agents'
 
 const homes: string[] = []
 
@@ -47,7 +47,7 @@ describe('Pi config editor defaults', () => {
       },
       mcpServers: {
         user_docs: { url: 'https://docs.example.com/mcp' },
-        'hermes-studio-api': {
+        'ekko-studio-api': {
           command: 'stale-managed',
           env: { HERMES_WEB_UI_MANAGED_MCP: '1' },
         },

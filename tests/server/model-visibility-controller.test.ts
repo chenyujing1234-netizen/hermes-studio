@@ -28,7 +28,7 @@ vi.mock('fs', () => ({
   readFileSync: mockReadFileSync,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/profiles/profile', () => ({
   getActiveEnvPath: () => '/fake/home/.hermes/.env',
   getActiveAuthPath: () => '/fake/home/.hermes/auth.json',
   getActiveProfileName: () => 'default',
@@ -36,15 +36,14 @@ vi.mock('../../packages/server/src/services/hermes/hermes-profile', () => ({
   listProfileNamesFromDisk: mockListProfileNamesFromDisk,
 }))
 
-vi.mock('../../packages/server/src/db/hermes/users-store', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/users', () => ({
   listUserProfiles: mockListUserProfiles,
 }))
 
-vi.mock('../../packages/server/src/services/config-helpers', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/profile-config', () => ({
   readConfigYaml: mockReadConfigYaml,
   readConfigYamlForProfile: mockReadConfigYamlForProfile,
   writeConfigYaml: vi.fn(),
-  fetchProviderModels: mockFetchProviderModels,
   buildModelGroups: mockBuildModelGroups,
   PROVIDER_ENV_MAP: {
     'fun-codex': { api_key_env: '', base_url_env: '' },
@@ -57,7 +56,11 @@ vi.mock('../../packages/server/src/services/config-helpers', () => ({
   },
 }))
 
-vi.mock('../../packages/server/src/shared/providers', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/provider-catalog', () => ({
+  fetchProviderModels: mockFetchProviderModels,
+}))
+
+vi.mock('../../packages/server/src/modules/studio/contracts/providers', () => ({
   buildProviderModelMap: () => ({
     deepseek: ['deepseek-chat', 'deepseek-reasoner'],
     'xai-oauth': ['grok-4.3', 'grok-4.20-0309-reasoning'],
@@ -67,8 +70,8 @@ vi.mock('../../packages/server/src/shared/providers', () => ({
   PROVIDER_PRESETS: [
     {
       value: 'fun-codex',
-      label: 'Codex-apikey.fun',
-      base_url: 'https://api.apikey.fun/v1',
+      label: 'Codex-apikey.fan',
+      base_url: 'https://api.apikey.fan/v1',
       models: ['gpt-5.5', 'gpt-5.4'],
       builtin: true,
     },
@@ -118,19 +121,19 @@ vi.mock('../../packages/server/src/shared/providers', () => ({
   ],
 }))
 
-vi.mock('../../packages/server/src/services/hermes/copilot-models', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/providers/copilot-models', () => ({
   getCopilotModelsDetailed: mockGetCopilotModelsDetailed,
   resolveCopilotOAuthToken: vi.fn(async () => ''),
 }))
 
-vi.mock('../../packages/server/src/services/app-config', () => ({
+vi.mock('../../packages/server/src/modules/studio/public/app-config', () => ({
   readAppConfig: mockReadAppConfig,
   writeAppConfig: mockWriteAppConfig,
   providerDisplayLabel: (appConfig: any, profile: string, providerId: string, fallback: string) =>
     appConfig?.providerLabels?.[profile]?.[providerId]?.trim?.() || fallback,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/model-catalog-cache', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/providers/model-catalog-cache', () => ({
   readProviderModelCatalogCache: mockReadProviderModelCatalogCache,
   resolveProviderCatalogModels: mockResolveProviderCatalogModels,
   resolveProviderCatalogEntry: vi.fn(() => undefined),
@@ -138,19 +141,21 @@ vi.mock('../../packages/server/src/services/hermes/model-catalog-cache', () => (
   writeProviderModelCatalogEntry: mockWriteProviderModelCatalogEntry,
 }))
 
-vi.mock('../../packages/server/src/services/hermes/provider-model-refresh', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/providers/provider-model-refresh', () => ({
   providerModelRefreshCapabilities: () => ({ refreshable: true }),
 }))
 
-vi.mock('../../packages/server/src/db', () => ({
-  getDb: vi.fn(),
+vi.mock('../../packages/server/src/modules/studio/public/provider-context', () => ({
+  readModelContextRecord: vi.fn(),
+  upsertModelContextRecord: vi.fn(),
 }))
 
-vi.mock('../../packages/server/src/db/hermes/schemas', () => ({
-  MODEL_CONTEXT_TABLE: 'model_context',
-}))
+const mockInvalidateProviderRuntime = vi.hoisted(() => vi.fn())
+vi.mock('../../packages/server/src/modules/studio/public/provider-runtime', () => ({ invalidateProviderRuntime: mockInvalidateProviderRuntime }))
 
-import * as ctrl from '../../packages/server/src/controllers/hermes/models'
+import { upsertModelContextRecord } from '../../packages/server/src/modules/studio/public/provider-context'
+
+import * as ctrl from '../../packages/server/src/modules/hermes/controllers/models'
 
 function makeCtx(body: Record<string, unknown> = {}): any {
   return { params: {}, query: {}, request: { body }, body: undefined, status: 200 }
@@ -194,6 +199,17 @@ beforeEach(() => {
 })
 
 describe('models controller — model visibility', () => {
+  it('refreshes the matching provider runtimes after saving a manual model window', async () => {
+    vi.mocked(upsertModelContextRecord).mockReturnValue({ available: true,
+      row: { profile: 'research', provider: 'test', model: 'test-model', context_limit: 80000 } } as any)
+    const ctx = makeCtx({ provider: 'test', model: 'test-model', context_limit: 80000 })
+    ctx.state = { profile: { name: 'research' } }
+    await ctrl.updateModelContext(ctx)
+    expect(ctx.body.success).toBe(true)
+    expect(upsertModelContextRecord).toHaveBeenCalledWith('research', 'test', 'test-model', 80000)
+    expect(mockInvalidateProviderRuntime).toHaveBeenCalledWith('research', 'test')
+  })
+
   it('filters available models per provider without changing canonical IDs', async () => {
     mockReadAppConfig.mockResolvedValue({
       modelVisibility: {

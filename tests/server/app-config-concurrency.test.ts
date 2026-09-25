@@ -21,7 +21,7 @@ afterEach(() => {
 
 describe('app config writes', () => {
   it('merges concurrent patches by reading under the shared file lock', async () => {
-    const { writeAppConfig } = await import('../../packages/server/src/services/app-config')
+    const { writeAppConfig } = await import('../../packages/server/src/modules/studio/services/config/app-config')
 
     await Promise.all([
       writeAppConfig({ modelAliases: { deepseek: { model: 'Alias' } } }),
@@ -32,4 +32,15 @@ describe('app config writes', () => {
     expect(stored.modelAliases).toEqual({ deepseek: { model: 'Alias' } })
     expect(stored.providerLabels).toEqual({ research: { deepseek: 'Research DeepSeek' } })
   })
+  it('retains global false values and other settings across reload and unrelated upgrades', async () => {
+    const first = await import('../../packages/server/src/modules/studio/services/config/app-config')
+    await first.writeAppConfig({ copilotEnabled: false, gatewayAutoStart: { enabled: false }, appRelayRoute: 'cloudflare' })
+    vi.resetModules()
+    const next = await import('../../packages/server/src/modules/studio/services/config/app-config')
+    expect(await next.readAppConfig()).toMatchObject({ copilotEnabled: false, gatewayAutoStart: { enabled: false }, appRelayRoute: 'cloudflare' })
+    await next.writeAppConfig({ modelAliases: { provider: { model: 'name' } } })
+    next.invalidateAppConfigCache()
+    expect(await next.readAppConfig()).toMatchObject({ copilotEnabled: false, gatewayAutoStart: { enabled: false }, appRelayRoute: 'cloudflare' })
+  })
+
 })

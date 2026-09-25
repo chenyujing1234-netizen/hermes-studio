@@ -13,8 +13,8 @@ const historySessions = [
     started_at: 1_790_000_000,
     ended_at: null,
     last_active: 1_790_000_100,
-    message_count: 2,
-    tool_call_count: 0,
+    message_count: 4,
+    tool_call_count: 2,
     input_tokens: 10,
     output_tokens: 20,
     cache_read_tokens: 0,
@@ -79,36 +79,56 @@ const historySessions = [
 function detailFor(id: string, sessions = historySessions) {
   const session = sessions.find(s => s.id === id)
   if (!session) return null
+  const toolMessages = id === 'hist-alpha'
+    ? [
+        { id: 2, tool_call_id: 'history-tool-1', tool_name: 'read_file', content: '{"path":"README.md"}' },
+        { id: 3, tool_call_id: 'history-tool-2', tool_name: 'search', content: '{"matches":2}' },
+      ].map(tool => ({
+        ...tool,
+        session_id: id,
+        role: 'tool',
+        tool_calls: null,
+        run_marker: 'history-run-1',
+        timestamp: session.started_at + tool.id - 1,
+        token_count: null,
+        finish_reason: null,
+        reasoning: null,
+      }))
+    : []
+  const messages = [
+    {
+      id: 1,
+      session_id: id,
+      role: 'user',
+      content: `Question for ${session.title}`,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      run_marker: null,
+      timestamp: session.started_at,
+      token_count: null,
+      finish_reason: null,
+      reasoning: null,
+    },
+    ...toolMessages,
+    {
+      id: id === 'hist-alpha' ? 4 : 2,
+      session_id: id,
+      role: 'assistant',
+      content: `Answer from ${session.title}`,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      run_marker: id === 'hist-alpha' ? 'history-run-1' : null,
+      timestamp: session.started_at + (id === 'hist-alpha' ? 3 : 1),
+      token_count: null,
+      finish_reason: null,
+      reasoning: null,
+    },
+  ]
   return {
     ...session,
-    messages: [
-      {
-        id: 1,
-        session_id: id,
-        role: 'user',
-        content: `Question for ${session.title}`,
-        tool_call_id: null,
-        tool_calls: null,
-        tool_name: null,
-        timestamp: session.started_at,
-        token_count: null,
-        finish_reason: null,
-        reasoning: null,
-      },
-      {
-        id: 2,
-        session_id: id,
-        role: 'assistant',
-        content: `Answer from ${session.title}`,
-        tool_call_id: null,
-        tool_calls: null,
-        tool_name: null,
-        timestamp: session.started_at + 1,
-        token_count: null,
-        finish_reason: null,
-        reasoning: null,
-      },
-    ],
+    messages,
   }
 }
 
@@ -132,9 +152,10 @@ async function mockHistoryApi(page: Page, sessions = historySessions, groupRooms
 
     if (pathname === '/health') return json({ status: 'ok' })
     if (pathname === '/api/auth/status') return json({ hasPasswordLogin: false, username: null })
+    if (pathname === '/api/hermes/runtime-versions/jobs' && request.method() === 'GET') return json({ jobs: [] })
     if (pathname === '/api/hermes/available-models') return json({ default: 'test-model', default_provider: 'test-provider', groups: [TEST_MODEL_GROUP], allProviders: [TEST_MODEL_GROUP], model_aliases: {}, model_visibility: {} })
     if (pathname === '/api/hermes/profiles') return json({ profiles: [{ name: 'default', active: true, model: 'test-model', gateway: 'test' }] })
-    if (pathname === '/api/hermes/group-chat/rooms') {
+    if (pathname === '/api/studio/group-chat/rooms') {
       const offset = Number(url.searchParams.get('offset') || 0)
       const limit = Number(url.searchParams.get('limit') || 50)
       return json({
@@ -145,7 +166,7 @@ async function mockHistoryApi(page: Page, sessions = historySessions, groupRooms
         hasMore: offset + limit < groupRooms.length,
       })
     }
-    const groupRoomMatch = pathname.match(/^\/api\/hermes\/group-chat\/rooms\/([^/]+)$/)
+    const groupRoomMatch = pathname.match(/^\/api\/studio\/group-chat\/rooms\/([^/]+)$/)
     if (groupRoomMatch) {
       const roomId = decodeURIComponent(groupRoomMatch[1])
       const room = groupRooms.find(item => item.id === roomId)
@@ -161,7 +182,7 @@ async function mockHistoryApi(page: Page, sessions = historySessions, groupRooms
         hasMore: false,
       })
     }
-    if (pathname === '/api/hermes/sessions/hermes/groups') {
+    if (pathname === '/api/studio/sessions/hermes/groups') {
       const limit = Number(url.searchParams.get('limit') || 20)
       const includedIds = new Set(url.searchParams.getAll('include'))
       const bySource = new Map<string, typeof sessions>()
@@ -179,7 +200,7 @@ async function mockHistoryApi(page: Page, sessions = historySessions, groupRooms
         included: sessions.filter(session => includedIds.has(session.id)),
       })
     }
-    if (pathname === '/api/hermes/sessions/hermes') {
+    if (pathname === '/api/studio/sessions/hermes') {
       const source = url.searchParams.get('source')
       if (!source) return json({ sessions })
       const offset = Number(url.searchParams.get('offset') || 0)
@@ -195,7 +216,7 @@ async function mockHistoryApi(page: Page, sessions = historySessions, groupRooms
       })
     }
 
-    const detailMatch = pathname.match(/^\/api\/hermes\/sessions\/hermes\/([^/]+)$/)
+    const detailMatch = pathname.match(/^\/api\/studio\/sessions\/hermes\/([^/]+)$/)
     if (detailMatch) {
       const detail = detailFor(decodeURIComponent(detailMatch[1]), sessions)
       return detail ? json({ session: detail }) : json({ error: 'Session not found' }, 404)
@@ -217,6 +238,51 @@ test.describe('history session deep links', () => {
     await expect(page.getByText('Beta History Session').first()).toBeVisible()
     await expect(page.getByText('Answer from Beta History Session')).toBeVisible()
     await expect(page).toHaveURL(/#\/hermes\/history\/session\/hist-beta$/)
+  })
+
+  test('restores the task plan independently of tool traces in paginated history', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('hermes_show_tool_calls', 'false'))
+    await page.route('**/api/studio/sessions/conversations/hist-beta/messages/paginated*', route => {
+      const detail = detailFor('hist-beta', historySessions)!
+      const taskPlan = {
+        session_id: 'hist-beta', run_id: 'history-plan-run', plan_id: 'history-plan-run', revision: 3,
+        execution_state: 'ended', created_at: detail.started_at * 1000, updated_at: detail.last_active * 1000,
+        plan: [{ id: 'inspect', step: 'Inspect existing implementation', status: 'completed' },
+          { id: 'verify', step: 'Verify remaining work', status: 'pending' }],
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        session: detail,
+        messages: detail.messages.map(message => ({ ...message, run_marker: message.role === 'user' ? null : taskPlan.run_id })),
+        taskPlans: [taskPlan], workspaceRunChanges: [], total: detail.messages.length, offset: 0, limit: 150, hasMore: false,
+      }) })
+    })
+    await page.goto('/#/hermes/history/session/hist-beta')
+    const card = page.getByTestId('task-plan-card')
+    await expect(card).toContainText('1/2 completed')
+    await expect(card).toContainText('Run ended; unfinished steps remain')
+    await expect(card.locator('.pending')).toHaveCount(1)
+    await page.reload()
+    await expect(card).toHaveCount(1)
+    await expect(card).toContainText('1/2 completed')
+    await card.screenshot({ path: test.info().outputPath('task-plan-history.png'), animations: 'disabled' })
+  })
+
+  test('completed tool runs can expand and collapse in history', async ({ page }) => {
+    await page.goto('/#/hermes/history/session/hist-alpha')
+
+    const card = page.locator('.tool-run-card[data-run-id="history-run-1"]')
+    const toggle = card.locator('.tool-run-header')
+    await expect(card).toBeVisible()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(card.locator('.message.tool')).toHaveCount(0)
+
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(card.locator('.message.tool')).toHaveCount(2)
+
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(card.locator('.message.tool')).toHaveCount(0)
   })
 
   test('API Server sessions are available as a History source', async ({ page }) => {
@@ -287,4 +353,15 @@ test.describe('history source pagination', () => {
     await expect(page.getByText('Stress History Session 53')).toBeVisible()
     await expect(loadMore).toHaveCount(0)
   })
+})
+
+
+test('groups database-pinned history separately from its source', async ({ page }) => {
+  await authenticate(page)
+  await mockHistoryApi(page, historySessions.map(session => ({ ...session, is_pinned: session.id === 'hist-alpha' ? 1 : 0 })))
+  await page.goto('/#/hermes/history')
+  const pinned = page.locator('.session-group-header').filter({ hasText: 'Pinned' })
+  await expect(pinned).toBeVisible()
+  await expect(page.locator('.session-item').filter({ hasText: 'Alpha History Session' })).toHaveCount(1)
+  await expect(page.locator('.session-item').filter({ hasText: 'Alpha History Session' }).locator('.session-item-pin')).toBeVisible()
 })

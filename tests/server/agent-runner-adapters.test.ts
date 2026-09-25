@@ -6,25 +6,27 @@ import {
   responseToolNamespaceForName,
   responsesToAnthropicMessages,
   responsesToOpenAiChat,
+  stripHistoricalResponsesInlineImages,
   truncateResponsesToolOutputs,
-} from '../../packages/server/src/services/coding-agents/shared/adapters/responses'
+} from '../../packages/server/src/modules/coding-agents/protocol/adapters/responses'
 import {
   anthropicToOpenAiChat,
   anthropicToOpenAiResponses,
   openAiResponsesToAnthropicMessage,
   openAiToAnthropicMessage,
-} from '../../packages/server/src/services/coding-agents/shared/adapters/anthropic'
+} from '../../packages/server/src/modules/coding-agents/protocol/adapters/anthropic'
 import {
   openAiChatSseToAnthropicEvents,
   openAiResponsesSseToAnthropicEvents,
   type AnthropicStreamEvent,
-} from '../../packages/server/src/services/coding-agents/shared/adapters/anthropic-stream'
+} from '../../packages/server/src/modules/coding-agents/protocol/adapters/anthropic-stream'
 import {
   anthropicMessagesSseToResponsesEvents,
+  normalizeResponsesSseEvents,
   openAiChatSseToResponsesEvents,
   openAiResponsesSseToResponsesEvents,
   type CanonicalResponsesEvent,
-} from '../../packages/server/src/services/coding-agents/shared/adapters/responses-stream'
+} from '../../packages/server/src/modules/coding-agents/protocol/adapters/responses-stream'
 
 const target = { model: 'test-model' }
 const codexTarget = { model: 'test-model', annotateMcpToolNamespaces: true }
@@ -75,6 +77,69 @@ describe('agent runner Responses adapters', () => {
     expect(cjkTruncated.endsWith('TAIL_MARKER')).toBe(true)
   })
 
+  it('strips every historical inline image while preserving the full current turn', () => {
+    const oldUserImage = 'data:image/png;base64,OLD_USER'
+    const oldToolImage = 'data:image/jpeg;base64,OLD_TOOL'
+    const currentImageA = 'data:image/png;base64,CURRENT_A'
+    const currentImageB = 'data:image/png;base64,CURRENT_B'
+    const currentToolImage = 'data:image/webp;base64,CURRENT_TOOL'
+    const remoteHistoricalImage = 'https://example.com/old.png'
+    const body = {
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'old turn' },
+            { type: 'input_image', image_url: oldUserImage },
+            { type: 'input_image', image_url: remoteHistoricalImage },
+          ],
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'old-tool',
+          output: [{ type: 'input_image', image_url: { url: oldToolImage } }],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'current turn' },
+            { type: 'input_image', image_url: currentImageA },
+            { type: 'input_image', image_url: { url: currentImageB } },
+          ],
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'current-tool',
+          output: [{ type: 'input_image', image_url: currentToolImage }],
+        },
+      ],
+    }
+
+    const sanitized = stripHistoricalResponsesInlineImages(body)
+    const serialized = JSON.stringify(sanitized)
+
+    expect(sanitized).not.toBe(body)
+    expect(serialized).not.toContain(oldUserImage)
+    expect(serialized).not.toContain(oldToolImage)
+    expect(serialized).toContain(remoteHistoricalImage)
+    expect(serialized).toContain(currentImageA)
+    expect(serialized).toContain(currentImageB)
+    expect(serialized).toContain(currentToolImage)
+    expect(serialized.match(/historical inline image omitted before provider request/g)).toHaveLength(2)
+    expect(body.input[0].content[1]).toEqual({ type: 'input_image', image_url: oldUserImage })
+    expect(body.input[1].output[0]).toEqual({ type: 'input_image', image_url: { url: oldToolImage } })
+    expect(sanitized.input[2]).toBe(body.input[2])
+    expect(sanitized.input[3]).toBe(body.input[3])
+  })
+
+  it('does not strip inline images when no current user turn boundary exists', () => {
+    const body = {
+      input: [{ type: 'function_call_output', output: [{ type: 'input_image', image_url: 'data:image/png;base64,ONLY' }] }],
+    }
+
+    expect(stripHistoricalResponsesInlineImages(body)).toBe(body)
+  })
+
   it('converts Responses input to OpenAI Chat messages and tools', () => {
     const body = {
       instructions: 'be terse',
@@ -97,9 +162,8 @@ describe('agent runner Responses adapters', () => {
       top_p: 0.9,
       stream: false,
       messages: [
-        { role: 'system', content: 'be terse' },
+        { role: 'system', content: 'be terse\n\nrules' },
         { role: 'user', content: 'hello' },
-        { role: 'system', content: 'rules' },
         {
           role: 'assistant',
           content: null,
@@ -116,6 +180,143 @@ describe('agent runner Responses adapters', () => {
         function: { name: 'search', description: 'Search', parameters: { type: 'object' } },
       }],
     })
+  })
+
+  it('keeps a single top-level instructions system message at the front', () => {
+    const body = {
+      instructions: 'core system prompt',
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      ],
+    }
+
+    expect(responsesToOpenAiChat(body, target).messages).toEqual([
+      { role: 'system', content: 'core system prompt' },
+      { role: 'user', content: 'hi' },
+    ])
+  })
+
+  it('merges multiple system messages into one leading message (vLLM compatibility)', () => {
+    // Codex 0.149 sends both a top-level `instructions` string and `developer`
+    // messages inside `input`. Both convert to `system`; vLLM rejects the
+    // second one ("System message must be at the beginning"), so they must be
+    // merged into a single leading system message.
+    const body = {
+      instructions: 'top-level instructions',
+      input: [
+        { role: 'developer', content: [{ type: 'input_text', text: 'developer message one' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+        { role: 'developer', content: [{ type: 'input_text', text: 'developer message two' }] },
+      ],
+    }
+
+    const messages = responsesToOpenAiChat(body, target).messages
+    expect(messages).toEqual([
+      { role: 'system', content: 'top-level instructions\n\ndeveloper message one\n\ndeveloper message two' },
+      { role: 'user', content: 'hello' },
+    ])
+    const systemMessages = messages.filter((message: any) => message.role === 'system')
+    expect(systemMessages).toHaveLength(1)
+    expect(messages[0].role).toBe('system')
+  })
+
+  it('replays Responses reasoning_content on DeepSeek tool-call continuations', () => {
+    const body = {
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'inspect the repo' }] },
+        {
+          type: 'reasoning',
+          id: 'rs_deepseek',
+          summary: [{ type: 'summary_text', text: 'I should inspect the repository first.' }],
+        },
+        {
+          type: 'function_call',
+          call_id: 'call_read',
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_read',
+          output: 'repository contents',
+        },
+      ],
+    }
+
+    expect(responsesToOpenAiChat(body, anthropicTarget).messages).toEqual([
+      { role: 'user', content: 'inspect the repo' },
+      {
+        role: 'assistant',
+        content: null,
+        reasoning_content: 'I should inspect the repository first.',
+        tool_calls: [{
+          id: 'call_read',
+          type: 'function',
+          function: { name: 'read_file', arguments: '{"path":"README.md"}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_read', content: 'repository contents' },
+    ])
+    expect(responsesToOpenAiChat(body, target).messages[1]).not.toHaveProperty('reasoning_content')
+  })
+
+  it.each(['reasoning_content', 'reasoning', 'reasoning_text'])('replays inline %s without treating assistant content as reasoning', (field) => {
+    const body = { input: [
+      { role: 'user', content: 'first question', [field]: 'not assistant reasoning' },
+      { role: 'assistant', content: [{ type: 'output_text', text: 'first answer' }], [field]: 'First analysis.' },
+      { role: 'user', content: 'follow up' },
+      { role: 'assistant', content: 'plain answer' },
+    ] }
+    const before = structuredClone(body)
+    expect(responsesToOpenAiChat(body, anthropicTarget).messages).toEqual([
+      { role: 'user', content: 'first question' },
+      { role: 'assistant', content: 'first answer', reasoning_content: 'First analysis.' },
+      { role: 'user', content: 'follow up' },
+      { role: 'assistant', content: 'plain answer', reasoning_content: '' },
+    ])
+    expect(body).toEqual(before)
+    for (const message of responsesToOpenAiChat(body, target).messages) {
+      expect(message).not.toHaveProperty('reasoning_content')
+    }
+  })
+
+  it('prefers inline reasoning and retains standalone reasoning for assistant history', () => {
+    const body = { input: [
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Short summary.' }] },
+      { role: 'assistant', content: 'answer', reasoning_content: 'Full original reasoning.' },
+      { role: 'user', content: 'continue' },
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'Next analysis.' }] },
+      { role: 'assistant', content: 'next answer' },
+    ] }
+    expect(responsesToOpenAiChat(body, anthropicTarget).messages).toEqual([
+      { role: 'assistant', content: 'answer', reasoning_content: 'Full original reasoning.' },
+      { role: 'user', content: 'continue' },
+      { role: 'assistant', content: 'next answer', reasoning_content: 'Next analysis.' },
+    ])
+  })
+
+  it('fills missing reasoning across tool batches without leaking earlier reasoning', () => {
+    const body = { input: [
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'First tool analysis.' }] },
+      { type: 'function_call', call_id: 'first', name: 'read_file', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'first', output: 'first result' },
+      { type: 'function_call', call_id: 'second', name: 'read_file', arguments: '{}' },
+      { type: 'function_call', call_id: 'third', name: 'read_file', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'third', output: 'third result' },
+      { type: 'function_call_output', call_id: 'second', output: 'second result' },
+      { role: 'assistant', content: 'done' },
+    ] }
+    const messages = responsesToOpenAiChat(body, anthropicTarget).messages
+    expect(messages.map((message: any) => message.role)).toEqual(['assistant', 'tool', 'assistant', 'tool', 'tool', 'assistant'])
+    expect(messages[0].reasoning_content).toBe('First tool analysis.')
+    expect(messages[2].reasoning_content).toBe('')
+    expect(messages[2].tool_calls.map((call: any) => call.id)).toEqual(['second', 'third'])
+    expect(messages[3]).toEqual({ role: 'tool', tool_call_id: 'second', content: 'second result' })
+    expect(messages[4]).toEqual({ role: 'tool', tool_call_id: 'third', content: 'third result' })
+    expect(messages[5].reasoning_content).toBe('')
+    for (const message of responsesToOpenAiChat(body, target).messages) {
+      expect(message).not.toHaveProperty('reasoning_content')
+    }
   })
 
   it('preserves Responses image inputs for Chat and Anthropic providers', () => {
@@ -325,7 +526,7 @@ describe('agent runner Responses adapters', () => {
           call_id: 'call_search',
           status: 'completed',
           execution: 'client',
-          arguments: { query: 'Hermes Studio browser tabs navigation' },
+          arguments: { query: 'Ekko Studio browser tabs navigation' },
         },
         {
           type: 'tool_search_output',
@@ -334,11 +535,11 @@ describe('agent runner Responses adapters', () => {
           execution: 'client',
           tools: [{
             type: 'namespace',
-            name: 'mcp__hermes_studio_browser',
+            name: 'mcp__ekko_studio_browser',
             description: 'Hermes browser tools.',
             tools: [{
               type: 'function',
-              name: 'hermes_studio_browser_toolset',
+              name: 'ekko_studio_browser_toolset',
               description: 'Discover browser operations.',
               parameters: { type: 'object', properties: { action: { type: 'string' } }, required: ['action'] },
             }],
@@ -356,7 +557,7 @@ describe('agent runner Responses adapters', () => {
           type: 'tool_use',
           id: 'call_search',
           name: 'tool_search',
-          input: { query: 'Hermes Studio browser tabs navigation' },
+          input: { query: 'Ekko Studio browser tabs navigation' },
         }],
       },
       {
@@ -364,31 +565,42 @@ describe('agent runner Responses adapters', () => {
         content: [{
           type: 'tool_result',
           tool_use_id: 'call_search',
-          content: 'Loaded deferred tools: mcp__hermes_studio_browser.hermes_studio_browser_toolset',
+          content: 'Loaded deferred tools: mcp__ekko_studio_browser.ekko_studio_browser_toolset',
         }],
       },
     ])
     expect(followup.tools).toEqual([
       expect.objectContaining({ name: 'tool_search' }),
       {
-        name: 'hermes_studio_browser_toolset',
+        name: 'ekko_studio_browser_toolset',
         description: 'Discover browser operations.',
         input_schema: { type: 'object', properties: { action: { type: 'string' } }, required: ['action'] },
       },
     ])
   })
 
+  it('keeps historical Hermes namespace calls routable after the Ekko rename', () => {
+    const result = responsesToOpenAiChat({
+      input: [], tools: [{ type: 'namespace', name: 'mcp__hermes_studio_api' }],
+    }, target)
+    expect(result.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ function: expect.objectContaining({ name: 'hermes_studio_api_request' }) }),
+    ]))
+    expect(responseToolNamespaceForName('hermes_studio_api_request')).toBe('mcp__hermes_studio_api')
+    expect(responseToolNamespaceForName('ekko_studio_api_request')).toBe('mcp__ekko_studio_api')
+  })
+
   it('expands Hermes MCP namespace tools for Chat and Anthropic providers', () => {
     const body = {
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'list devices' }] }],
-      tools: [{ type: 'namespace', name: 'mcp__hermes_studio', description: 'Hermes tools' }],
+      tools: [{ type: 'namespace', name: 'mcp__ekko_studio', description: 'Hermes tools' }],
     }
 
     expect(responsesToOpenAiChat(body, target).tools).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: 'function',
         function: expect.objectContaining({
-          name: 'hermes_studio_lan_devices_scan',
+          name: 'ekko_studio_lan_devices_scan',
           parameters: expect.objectContaining({
             properties: expect.objectContaining({
               profile: expect.any(Object),
@@ -401,7 +613,7 @@ describe('agent runner Responses adapters', () => {
 
     expect(responsesToAnthropicMessages(body, target).tools).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        name: 'hermes_studio_lan_devices_scan',
+        name: 'ekko_studio_lan_devices_scan',
         input_schema: expect.objectContaining({
           properties: expect.objectContaining({
             profile: expect.any(Object),
@@ -416,22 +628,22 @@ describe('agent runner Responses adapters', () => {
     const body = {
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'open a browser' }] }],
       tools: [
-        { type: 'namespace', name: 'mcp__hermes_studio_api' },
-        { type: 'namespace', name: 'mcp__hermes_studio_browser' },
-        { type: 'namespace', name: 'mcp__hermes_studio_devices' },
-        { type: 'namespace', name: 'mcp__hermes_studio_use' },
+        { type: 'namespace', name: 'mcp__ekko_studio_api' },
+        { type: 'namespace', name: 'mcp__ekko_studio_browser' },
+        { type: 'namespace', name: 'mcp__ekko_studio_devices' },
+        { type: 'namespace', name: 'mcp__ekko_studio_use' },
       ],
     }
 
     const anthropicTools = responsesToAnthropicMessages(body, target).tools
     expect(anthropicTools.map((tool: any) => tool.name)).toEqual([
-      'hermes_studio_api_openapi_get',
-      'hermes_studio_api_request',
-      'hermes_studio_browser_toolset',
-      'hermes_studio_devices_toolset',
-      'hermes_studio_use_toolset',
+      'ekko_studio_api_openapi_get',
+      'ekko_studio_api_request',
+      'ekko_studio_browser_toolset',
+      'ekko_studio_devices_toolset',
+      'ekko_studio_use_toolset',
     ])
-    expect(anthropicTools.find((tool: any) => tool.name === 'hermes_studio_browser_toolset')).toMatchObject({
+    expect(anthropicTools.find((tool: any) => tool.name === 'ekko_studio_browser_toolset')).toMatchObject({
       input_schema: {
         required: ['action'],
         properties: {
@@ -441,12 +653,23 @@ describe('agent runner Responses adapters', () => {
         },
       },
     })
-    expect(responseToolNamespaceForName('hermes_studio_browser_toolset')).toBe('mcp__hermes_studio_browser')
-    expect(normalizeResponseFunctionCall('hermes_studio_browser_toolset', '{"action":"list"}')).toEqual({
-      name: 'hermes_studio_browser_toolset',
+    expect(responseToolNamespaceForName('ekko_studio_browser_toolset')).toBe('mcp__ekko_studio_browser')
+    expect(normalizeResponseFunctionCall('ekko_studio_browser_toolset', '{"action":"list"}')).toEqual({
+      name: 'ekko_studio_browser_toolset',
       arguments: '{"action":"list"}',
-      namespace: 'mcp__hermes_studio_browser',
+      namespace: 'mcp__ekko_studio_browser',
     })
+  })
+
+  it.each(['ekko', 'hermes'])('restores %s interaction namespace without changing context or arguments', prefix => {
+    for (const suffix of ['update_plan', 'clarify']) {
+      const name = `${prefix}_studio_${suffix}`
+      const args = JSON.stringify({ context_id: 'current-turn', plan: [{ id: 'a', step: 'Verify', status: 'in_progress' }] })
+      expect(normalizeResponseFunctionCall(name, args)).toEqual({
+        name, arguments: args, namespace: `mcp__${prefix}_studio_interaction`,
+      })
+    }
+    expect(responseToolNamespaceForName('unrelated_update_plan')).toBeUndefined()
   })
 
   it('keeps unknown MCP namespaces callable through a generic function fallback', () => {
@@ -523,7 +746,7 @@ describe('agent runner Responses adapters', () => {
         message: {
           tool_calls: [{
             id: 'call_1',
-            function: { name: 'hermes_studio_lan_devices_scan', arguments: '{"profile":"default"}' },
+            function: { name: 'ekko_studio_lan_devices_scan', arguments: '{"profile":"default"}' },
           }],
         },
       }],
@@ -531,8 +754,8 @@ describe('agent runner Responses adapters', () => {
       output: [{
         type: 'function_call',
         call_id: 'call_1',
-        name: 'hermes_studio_lan_devices_scan',
-        namespace: 'mcp__hermes_studio',
+        name: 'ekko_studio_lan_devices_scan',
+        namespace: 'mcp__ekko_studio',
       }],
     })
   })
@@ -592,7 +815,7 @@ describe('agent runner Responses adapters', () => {
         type: 'tool_use',
         id: 'call_search',
         name: 'tool_search',
-        input: { query: 'Hermes Studio browser', limit: 5 },
+        input: { query: 'Ekko Studio browser', limit: 5 },
       }],
       usage: { input_tokens: 2, output_tokens: 3 },
     }, target)).toMatchObject({
@@ -601,7 +824,7 @@ describe('agent runner Responses adapters', () => {
         call_id: 'call_search',
         status: 'completed',
         execution: 'client',
-        arguments: { query: 'Hermes Studio browser', limit: 5 },
+        arguments: { query: 'Ekko Studio browser', limit: 5 },
       }],
     })
   })
@@ -610,15 +833,15 @@ describe('agent runner Responses adapters', () => {
     expect(anthropicMessageToResponses({
       id: 'msg_1',
       content: [
-        { type: 'tool_use', id: 'toolu_1', name: 'hermes_studio_lan_devices_list', input: { profile: 'default' } },
+        { type: 'tool_use', id: 'toolu_1', name: 'ekko_studio_lan_devices_list', input: { profile: 'default' } },
       ],
       usage: { input_tokens: 1, output_tokens: 1 },
     }, target)).toMatchObject({
       output: [{
         type: 'function_call',
         call_id: 'toolu_1',
-        name: 'hermes_studio_lan_devices_list',
-        namespace: 'mcp__hermes_studio',
+        name: 'ekko_studio_lan_devices_list',
+        namespace: 'mcp__ekko_studio',
       }],
     })
   })
@@ -680,7 +903,17 @@ describe('agent runner Responses stream adapters', () => {
 	    expect(events[6].data).toMatchObject({ delta: 'llo', output_index: 1 })
 	    expect(events[7].data).toMatchObject({
 	      output_index: 2,
-	      item: { type: 'function_call', call_id: 'call_1', name: 'lookup' },
+	      item: { type: 'function_call', call_id: 'call_1', name: 'lookup', status: 'in_progress' },
+	    })
+	    expect(events[14].data).toMatchObject({
+	      output_index: 2,
+	      item: {
+	        type: 'function_call',
+	        call_id: 'call_1',
+	        name: 'lookup',
+	        arguments: '{"id":1}',
+	        status: 'completed',
+	      },
 	    })
 	    expect(events[10].data).toMatchObject({
 	      output_index: 0,
@@ -700,7 +933,7 @@ describe('agent runner Responses stream adapters', () => {
 	        output: [
 	          { type: 'reasoning', summary: [{ type: 'summary_text', text: 'think' }] },
 	          { type: 'message', content: [{ type: 'output_text', text: 'hello' }] },
-	          { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"id":1}' },
+	          { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"id":1}', status: 'completed' },
         ],
       },
     })
@@ -737,9 +970,21 @@ describe('agent runner Responses stream adapters', () => {
     })
   })
 
+  it.each(['ekko_studio_update_plan', 'ekko_studio_clarify'])('routes streamed %s to interaction rather than default functions', async name => {
+    const args = JSON.stringify({ context_id: 'current-turn' })
+    const chunk = { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_plan', function: { name, arguments: args } }] } }] }
+    const events = await collectEvents(openAiChatSseToResponsesEvents(encodedChunks([
+      `data: ${JSON.stringify(chunk)}\n\n`, 'data: [DONE]\n\n',
+    ]), codexTarget))
+    const done = events.find(event => event.type === 'response.output_item.done')
+    expect((done?.data as any).item).toMatchObject({
+      type: 'function_call', name, namespace: 'mcp__ekko_studio_interaction', arguments: args,
+    })
+  })
+
   it('marks expanded Hermes MCP Chat SSE tool calls with their Responses namespace', async () => {
     const events = await collectEvents(openAiChatSseToResponsesEvents(encodedChunks([
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"hermes_studio_lan_devices_scan","arguments":"{}"}}]}}]}\n\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"ekko_studio_lan_devices_scan","arguments":"{}"}}]}}]}\n\n',
       'data: [DONE]\n\n',
     ]), codexTarget))
 
@@ -750,8 +995,8 @@ describe('agent runner Responses stream adapters', () => {
           item: expect.objectContaining({
             type: 'function_call',
             call_id: 'call_1',
-            name: 'hermes_studio_lan_devices_scan',
-            namespace: 'mcp__hermes_studio',
+            name: 'ekko_studio_lan_devices_scan',
+            namespace: 'mcp__ekko_studio',
           }),
         }),
       }),
@@ -814,7 +1059,7 @@ describe('agent runner Responses stream adapters', () => {
   it('marks expanded Hermes MCP Anthropic SSE tool calls with their Responses namespace', async () => {
     const events = await collectEvents(anthropicMessagesSseToResponsesEvents(encodedChunks([
       'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\n',
-      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"hermes_studio_lan_devices_list","input":{}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"ekko_studio_lan_devices_list","input":{}}}\n\n',
       'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"profile\\":\\"default\\"}"}}\n\n',
       'event: message_stop\ndata: {"type":"message_stop"}\n\n',
     ]), codexTarget))
@@ -826,8 +1071,8 @@ describe('agent runner Responses stream adapters', () => {
           item: expect.objectContaining({
             type: 'function_call',
             call_id: 'toolu_1',
-            name: 'hermes_studio_lan_devices_list',
-            namespace: 'mcp__hermes_studio',
+            name: 'ekko_studio_lan_devices_list',
+            namespace: 'mcp__ekko_studio',
           }),
         }),
       }),
@@ -838,7 +1083,7 @@ describe('agent runner Responses stream adapters', () => {
     const events = await collectEvents(anthropicMessagesSseToResponsesEvents(encodedChunks([
       'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_search"}}\n\n',
       'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_search","name":"tool_search","input":{}}}\n\n',
-      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"Hermes Studio browser\\"}"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"Ekko Studio browser\\"}"}}\n\n',
       'event: message_stop\ndata: {"type":"message_stop"}\n\n',
     ]), codexTarget))
 
@@ -863,7 +1108,7 @@ describe('agent runner Responses stream adapters', () => {
             call_id: 'call_search',
             status: 'completed',
             execution: 'client',
-            arguments: { query: 'Hermes Studio browser' },
+            arguments: { query: 'Ekko Studio browser' },
           },
         }),
       }),
@@ -887,6 +1132,50 @@ describe('agent runner Responses stream adapters', () => {
         data: { type: 'response.output_text.delta', delta: 'hi' },
       },
     ])
+  })
+
+  it('fills fields required by strict Responses stream clients', async () => {
+    const events = await collectEvents(normalizeResponsesSseEvents(openAiResponsesSseToResponsesEvents(encodedChunks([
+      'event: response.created\ndata: {"response":{"id":"resp_strict","object":"response","status":"in_progress","model":"test-model","output":[]}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_strict","object":"response","status":"completed","model":"test-model","output":[]}}\n\n',
+    ]))))
+
+    expect(events.map(event => event.data.sequence_number)).toEqual([0, 1, 2])
+    expect((events[0].data.response as any).created_at).toEqual(expect.any(Number))
+    expect((events[2].data.response as any).created_at).toBe((events[0].data.response as any).created_at)
+  })
+
+  it.each([undefined, null])('fills absent text annotations throughout native Responses streams (%s)', async annotations => {
+    const part = { type: 'output_text', text: 'An image description', ...(annotations === null ? { annotations } : {}) }
+    const item = { type: 'message', id: 'msg_image', role: 'assistant', content: [part] }
+    const frames = [
+      { type: 'response.content_part.added', part },
+      { type: 'response.content_part.done', part },
+      { type: 'response.output_item.added', item },
+      { type: 'response.output_item.done', item },
+      { type: 'response.completed', response: { id: 'resp_image', output: [item] } },
+    ]
+    const events = await collectEvents(normalizeResponsesSseEvents(openAiResponsesSseToResponsesEvents(encodedChunks(
+      frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`),
+    ))))
+    const parts = events.flatMap(({ data }: any) => data.part ? [data.part] : data.item?.content || data.response.output[0].content)
+    expect(parts).toHaveLength(5)
+    for (const result of parts) expect(result).toEqual({ ...part, annotations: [] })
+  })
+
+  it('preserves provider annotations and leaves non-text content unchanged', async () => {
+    const citation = { type: 'url_citation', start_index: 0, end_index: 4, url: 'https://example.com', title: 'Source' }
+    const text = { type: 'output_text', text: 'Look', annotations: [citation] }
+    const refusal = { type: 'refusal', refusal: 'Cannot answer' }
+    const source = {
+      type: 'response.completed',
+      data: { response: { id: 'resp_citation', output: [{ type: 'message', content: [text, refusal] }] } },
+    }
+    const original = structuredClone(source)
+    const events = await collectEvents(normalizeResponsesSseEvents((async function* () { yield source })()))
+    expect((events[0].data.response as any).output[0].content).toEqual([text, refusal])
+    expect(source).toEqual(original)
   })
 })
 
@@ -946,6 +1235,49 @@ describe('agent runner Anthropic adapters', () => {
         function: { name: 'lookup', description: 'Lookup', parameters: { type: 'object' } },
       }],
     })
+  })
+
+  it('merges multiple system messages into one leading message (vLLM compatibility)', () => {
+    // Claude Code sends its primary prompt as the top-level `system` field and
+    // injects additional `role: 'system'` messages mid-conversation (e.g. the
+    // ToolSearch deferred-tools notice). A second system message mid-conversation
+    // is rejected by vLLM with "System message must be at the beginning." (400),
+    // so the adapter must keep exactly one leading system message.
+    const body = {
+      system: [
+        { type: 'text', text: 'claude code system prompt' },
+        { type: 'text', text: 'appended rules' },
+      ],
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+        { role: 'system', content: [{ type: 'text', text: 'deferred tools are now available' }] },
+      ],
+    }
+
+    const messages = anthropicToOpenAiChat(body, anthropicTarget).messages
+    expect(messages).toEqual([
+      {
+        role: 'system',
+        content: 'claude code system prompt\nappended rules\n\ndeferred tools are now available',
+      },
+      { role: 'user', content: 'hello' },
+    ])
+    expect(messages.filter((message: any) => message.role === 'system')).toHaveLength(1)
+    expect(messages[0].role).toBe('system')
+  })
+
+  it('keeps a single in-message system prompt at the front', () => {
+    const body = {
+      messages: [
+        { role: 'system', content: 'rules' },
+        { role: 'user', content: 'hi' },
+      ],
+    }
+
+    expect(anthropicToOpenAiChat(body, anthropicTarget).messages).toEqual([
+      { role: 'system', content: 'rules' },
+      { role: 'user', content: 'hi' },
+    ])
   })
 
   it('preserves Anthropic image inputs for Chat and Responses providers', () => {

@@ -17,7 +17,7 @@ const { mockGatewayAutostartDisabledByEnv, mockRestartGateway, mockReconcileGate
   mockDestroyProfile: vi.fn().mockResolvedValue({ destroyed: true }),
 }))
 
-vi.mock('../../packages/server/src/services/hermes/gateway-autostart', () => {
+vi.mock('../../packages/server/src/modules/hermes/services/gateway/autostart', () => {
   return {
     gatewayAutostartDisabledByEnv: mockGatewayAutostartDisabledByEnv,
     reconcileGatewayManagementTransition: mockReconcileGatewayManagement,
@@ -25,7 +25,7 @@ vi.mock('../../packages/server/src/services/hermes/gateway-autostart', () => {
   }
 })
 
-vi.mock('../../packages/server/src/services/hermes/agent-bridge', () => ({
+vi.mock('../../packages/server/src/modules/hermes/services/bridge/index', () => ({
   AgentBridgeClient: class {
     destroyProfile = mockDestroyProfile
   },
@@ -35,12 +35,15 @@ const originalHermesHome = process.env.HERMES_HOME
 const originalWebUiHome = process.env.HERMES_WEB_UI_HOME
 const tempHomes: string[] = []
 let hermesHome = ''
+const invalidateProviderRuntime = vi.hoisted(() => vi.fn())
+vi.mock('../../packages/server/src/modules/studio/public/provider-runtime', () => ({ invalidateProviderRuntime }))
 
 async function loadController() {
   vi.resetModules()
   process.env.HERMES_HOME = hermesHome
   process.env.HERMES_WEB_UI_HOME = hermesHome
-  return import('../../packages/server/src/controllers/hermes/config')
+  await import('../../packages/server/src/bootstrap/agent-profile-adapter')
+  return import('../../packages/server/src/modules/hermes/controllers/config')
 }
 
 function makeCtx(body: unknown, profile?: string): any {
@@ -60,6 +63,22 @@ beforeEach(async () => {
   hermesHome = await mkdtemp(join(tmpdir(), 'hermes-config-controller-'))
   tempHomes.push(hermesHome)
   await mkdir(hermesHome, { recursive: true })
+})
+
+it('invalidates scoped coding runtimes after a profile compression threshold change is saved', async () => {
+  const { updateConfig } = await loadController()
+  const ctx = makeCtx({ section: 'compression', values: { enabled: false, threshold: 0.65 } }, 'research')
+  await updateConfig(ctx)
+  expect(ctx.status).toBe(200)
+  expect(invalidateProviderRuntime).toHaveBeenCalledWith('research')
+})
+
+it('does not restart coding runtimes when only ordinary chat compression is toggled', async () => {
+  const { updateConfig } = await loadController()
+  const ctx = makeCtx({ section: 'compression', values: { enabled: false } }, 'research')
+  await updateConfig(ctx)
+  expect(ctx.body.success).toBe(true)
+  expect(invalidateProviderRuntime).not.toHaveBeenCalled()
 })
 
 afterEach(async () => {

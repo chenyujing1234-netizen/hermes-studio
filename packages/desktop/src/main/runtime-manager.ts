@@ -45,7 +45,7 @@ import {
 import { t } from './desktop-i18n'
 
 const DEFAULT_RUNTIME_BASE_URL = 'https://download.ekkolearnai.com'
-const DEFAULT_RUNTIME_GITHUB_REPO = 'EKKOLearnAI/hermes-studio'
+const DEFAULT_RUNTIME_GITHUB_REPO = 'EKKOLearnAI/ekko-studio'
 const RUNTIME_MANIFEST_NAME = 'runtime-manifest.json'
 const PACKAGED_RUNTIME_RELEASE_NAME = 'runtime-release.json'
 const ACTIVE_RUNTIME_VERSION_NAME = 'active-version.json'
@@ -92,6 +92,13 @@ type ActiveRuntimeVersion = {
   pendingRuntimeRootDirectory?: string
   runtimeMigrationError?: string
   runtimeActivationError?: string
+  runtimeValidationFailures?: Array<{
+    version: string
+    platform: string
+    directory: string
+    reason: string
+    failedAt: string
+  }>
   webUiDirectory?: string
   platform?: string
   updatedAt?: string
@@ -124,7 +131,14 @@ function requiredRuntimeFiles(root: string): string[] {
   const nodeBin = process.platform === 'win32'
     ? join(root, 'node', 'node.exe')
     : join(root, 'node', 'bin', 'node')
-  const files = [pythonBin, hermesBin, nodeBin, join(root, RUNTIME_MANIFEST_NAME)]
+  const files = [
+    pythonBin,
+    hermesBin,
+    join(root, 'python', 'run_agent.py'),
+    join(root, 'python', 'cli.py'),
+    nodeBin,
+    join(root, RUNTIME_MANIFEST_NAME),
+  ]
   if (process.platform === 'win32') files.push(join(root, 'git', 'cmd', 'git.exe'))
   return files
 }
@@ -636,6 +650,8 @@ export function writeActiveRuntimeVersion(
     platform: runtimePlatformKey(),
     updatedAt: new Date().toISOString(),
   }
+  next.runtimeValidationFailures = (active?.runtimeValidationFailures || [])
+    .filter(failure => resolve(failure.directory) !== resolve(runtimeRoot))
   if (desktopAppVersionChanged) {
     delete next.webUiVersion
     if (activeWebUiVersion) {

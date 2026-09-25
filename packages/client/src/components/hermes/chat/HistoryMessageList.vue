@@ -9,11 +9,14 @@ import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue"
 import { useI18n } from "vue-i18n";
 import VirtualMessageList from "./VirtualMessageList.vue";
 import MessageItem from "./MessageItem.vue";
+import { positionTaskPlansAtTurnEnd } from "@/utils/task-plan";
+import ToolRunCard from "./ToolRunCard.vue";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useToolTraceVisibility } from "@/composables/useToolTraceVisibility";
 import type { Session } from "@/stores/hermes/chat";
 import { messageScrollPositionKey, rememberMessageScrollPosition } from "./message-scroll-position";
 import { chatSessionAgentAvatar } from "@/utils/chat-agent-avatar";
+import { groupCompletedToolsByRun } from "./tool-run-grouping";
 
 const props = withDefaults(defineProps<{
   session?: Session | null; // Optional: use this session instead of chatStore.activeSession
@@ -37,13 +40,14 @@ const activeSessionScrollKey = computed(() =>
 const listInstanceKey = computed(() => activeSessionScrollKey.value || "history-empty");
 
 const displayMessages = computed(() =>
-  (activeSession.value?.messages || []).filter((m) => {
+  groupCompletedToolsByRun(positionTaskPlansAtTurnEnd((activeSession.value?.messages || []).filter((m) => {
     // Tool messages without a name are internal use only and remain hidden.
+    if (m.taskPlan) return true
     if (m.role === 'tool') return toolTraceVisible.value && !!m.toolName
     // Filter out messages with empty content.
     if (!m.content?.trim()) return false
     return true
-  }),
+  }))),
 );
 
 function isNearBottom(threshold = 200): boolean {
@@ -209,7 +213,13 @@ defineExpose({
         </div>
       </template>
       <template #item="{ message: msg }">
+        <ToolRunCard
+          v-if="msg.systemType === 'tool-run' && msg.toolRunId && msg.toolMessages"
+          :run-id="msg.toolRunId"
+          :tools="msg.toolMessages"
+        />
         <MessageItem
+          v-else
           :message="msg"
           :assistant-agent="assistantAgent"
           :highlight="chatStore.focusMessageId === msg.id"

@@ -2,28 +2,28 @@ import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import '../../packages/server/src/bootstrap/coding-agent-adapters'
 import {
   anthropicMessagesUrl,
   chatCompletionsUrl,
   providerEndpointUrl,
   responsesUrl,
-} from '../../packages/server/src/services/coding-agents/shared/endpoint-resolver'
-import { parseSseFrame, readSseFrames, readSseFrameTexts, sseEvent } from '../../packages/server/src/services/coding-agents/shared/sse'
-import { AgentTargetRegistry, type AgentTargetInput } from '../../packages/server/src/services/coding-agents/shared/target-registry'
-import { teeAsyncIterable } from '../../packages/server/src/services/coding-agents/shared/stream-tee'
+} from '../../packages/server/src/modules/coding-agents/protocol/endpoint-resolver'
+import { parseSseFrame, readSseFrames, readSseFrameTexts, sseEvent } from '../../packages/server/src/modules/coding-agents/protocol/sse'
+import { AgentTargetRegistry, type AgentTargetInput } from '../../packages/server/src/modules/coding-agents/protocol/target-registry'
+import { teeAsyncIterable } from '../../packages/server/src/modules/coding-agents/protocol/stream-tee'
 import {
   buildClaudeStreamJsonInput,
   codexImageArgs,
   CodingAgentRunManager,
   codingAgentGatewayErrorMessage,
   sanitizeCodingAgentTerminalOutput,
-} from '../../packages/server/src/services/coding-agents/runtime/run-manager'
-import { mapCodingAgentResponseEvent } from '../../packages/server/src/services/coding-agents/runtime/event-mapper'
-import { applyResponseStreamEvent } from '../../packages/server/src/services/hermes/run-chat/response-stream'
-import { initAllHermesTables } from '../../packages/server/src/db/hermes/schemas'
-import { addMessage, getSession, getSessionDetail, listSessions } from '../../packages/server/src/db/hermes/session-store'
-import { getRecordedUsageTotals, getUsage } from '../../packages/server/src/db/hermes/usage-store'
-import { getChatRunServer, setChatRunServer } from '../../packages/server/src/services/hermes/run-chat/server-registry'
+} from '../../packages/server/src/modules/coding-agents/services/runtime/run-manager'
+import { applyResponseStreamEvent } from '../../packages/server/src/modules/studio/services/chat-run/response-stream'
+import { initAllHermesTables } from '../../packages/server/src/modules/studio/infrastructure/database/schemas'
+import { addMessage, createSession, getSession, getSessionDetail, listSessions } from '../../packages/server/src/modules/studio/repositories/session-store'
+import { getRecordedUsageTotals, getUsage } from '../../packages/server/src/modules/studio/repositories/usage-store'
+import { getChatRunServer, setChatRunServer } from '../../packages/server/src/modules/studio/services/chat-run/server-registry'
 
 describe('agent runner endpoint resolver', () => {
   it('adds v1 for provider hosts without an API root path', () => {
@@ -38,7 +38,7 @@ describe('agent runner endpoint resolver', () => {
       'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     )
     expect(chatCompletionsUrl('https://api.z.ai/api/paas/v4')).toBe('https://api.z.ai/api/paas/v4/chat/completions')
-    expect(responsesUrl('https://api.apikey.fun/v1/')).toBe('https://api.apikey.fun/v1/responses')
+    expect(responsesUrl('https://api.apikey.fan/v1/')).toBe('https://api.apikey.fan/v1/responses')
   })
 
   it('does not duplicate existing endpoint paths', () => {
@@ -50,7 +50,7 @@ describe('agent runner endpoint resolver', () => {
   })
 
   it('handles Anthropic-compatible roots', () => {
-    expect(anthropicMessagesUrl('https://api.apikey.fun')).toBe('https://api.apikey.fun/v1/messages')
+    expect(anthropicMessagesUrl('https://api.apikey.fan')).toBe('https://api.apikey.fan/v1/messages')
     expect(anthropicMessagesUrl('https://api.z.ai/api/anthropic')).toBe('https://api.z.ai/api/anthropic/v1/messages')
     expect(providerEndpointUrl('anthropic_messages', 'https://api.example.com/v1')).toBe('https://api.example.com/v1/messages')
   })
@@ -76,6 +76,77 @@ describe('coding agent completion errors', () => {
     } finally {
       setChatRunServer(previous)
     }
+  })
+
+  it.each([
+    ['claude-code', 'claude', 'Claude Code'],
+    ['grok', 'grok', 'Grok'],
+  ])('detaches an oversized %s native session after asynchronous compact failure', (agentId, storedAgent, agentName) => {
+    initAllHermesTables()
+    const manager = new CodingAgentRunManager()
+    const emitted = vi.fn()
+    ;(manager as any).emitToChat = emitted
+    const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const sessionId = `chat-native-compact-overflow-${agentId}-${suffix}`
+    createSession({
+      id: sessionId,
+      profile: 'default',
+      source: 'coding_agent',
+      agent: storedAgent,
+      agent_session_id: `agent-${suffix}`,
+      agent_native_session_id: `native-${suffix}`,
+      model: 'test-model',
+      provider: 'test-provider',
+      api_mode: 'chat_completions',
+      reasoning_effort: '',
+      agent_preset: '',
+      title: '',
+      workspace: process.cwd(),
+    })
+    const run: any = {
+      launch: { agentId, sessionId, agentNativeSessionId: `native-${suffix}` },
+      nativeCompactCommandActive: true,
+      nativeResumeReady: true,
+    }
+
+    ;(manager as any).recoverFailedNativeCompact(run, 'context_length_exceeded: input exceeds the context window')
+
+    expect(getSession(sessionId)?.agent_native_session_id).toBe('')
+    expect(run.launch.agentNativeSessionId).toBe('')
+    expect(run.nativeResumeReady).toBe(false)
+    expect(run.disposeAfterTurn).toBe(true)
+    expect(emitted).toHaveBeenCalledWith(sessionId, 'session.command', expect.objectContaining({
+      command: 'compact',
+      ok: true,
+      resetNativeThread: true,
+      message: expect.stringContaining(`fresh ${agentName} context`),
+    }))
+  })
+
+  it('does not detach a native session after a non-overflow compact failure', () => {
+    initAllHermesTables()
+    const manager = new CodingAgentRunManager()
+    const emitted = vi.fn()
+    ;(manager as any).emitToChat = emitted
+    const suffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const sessionId = `chat-native-compact-ordinary-${suffix}`
+    createSession({
+      id: sessionId, profile: 'default', source: 'coding_agent', agent: 'grok',
+      agent_session_id: `agent-${suffix}`, agent_native_session_id: `native-${suffix}`,
+      model: 'test-model', provider: 'test-provider', api_mode: 'chat_completions',
+      reasoning_effort: '', agent_preset: '', title: '', workspace: process.cwd(),
+    })
+    const run: any = {
+      launch: { agentId: 'grok', sessionId, agentNativeSessionId: `native-${suffix}` },
+      nativeCompactCommandActive: true, nativeResumeReady: true,
+    }
+
+    ;(manager as any).recoverFailedNativeCompact(run, 'native compact failed')
+
+    expect(getSession(sessionId)?.agent_native_session_id).toBe(`native-${suffix}`)
+    expect(run.nativeCompactCommandActive).toBe(false)
+    expect(run.disposeAfterTurn).toBeUndefined()
+    expect(emitted).not.toHaveBeenCalled()
   })
 
   it('does not let a stalled usage refresh block the terminal chat event', async () => {
@@ -583,7 +654,7 @@ describe('coding agent run state', () => {
     manager.shutdown()
   })
 
-  it('marks existing scoped Codex runners incompatible when Hermes MCP config is missing', () => {
+  it.each(['scoped', 'global'] as const)('marks existing %s Codex runners incompatible when Studio MCP config is missing', mode => {
     const codexHome = mkdtempSync(join(tmpdir(), 'hwui-codex-mcp-compat-'))
     try {
       writeFileSync(join(codexHome, 'config.toml'), 'model = "gpt-test"\n')
@@ -594,7 +665,7 @@ describe('coding agent run state', () => {
       manager.start({
         agentSessionId: 'agent-session-1',
         agentId: 'codex',
-        mode: 'scoped',
+        mode,
         profile: 'default',
         provider: 'test-provider',
         model: 'gpt-test',
@@ -609,15 +680,15 @@ describe('coding agent run state', () => {
 
       expect(manager.isSessionLaunchCompatible('chat-session-1', {
         agentId: 'codex',
-        mode: 'scoped',
+        mode,
         provider: 'test-provider',
         model: 'gpt-test',
       })).toBe(false)
 
-      writeFileSync(join(codexHome, 'config.toml'), '[mcp_servers.hermes-studio]\ncommand = "node"\n')
+      writeFileSync(join(codexHome, 'config.toml'), ['api', 'browser', 'devices', 'use', 'interaction'].map(toolset => `[mcp_servers.ekko-studio-${toolset}]\ncommand = "node"\n`).join('\n'))
       expect(manager.isSessionLaunchCompatible('chat-session-1', {
         agentId: 'codex',
-        mode: 'scoped',
+        mode,
         provider: 'test-provider',
         model: 'gpt-test',
       })).toBe(true)
@@ -625,6 +696,25 @@ describe('coding agent run state', () => {
       manager.shutdown()
     } finally {
       rmSync(codexHome, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['claude-code', 'pi'])('refreshes global %s runners that lack the private MCP launch argument', agentId => {
+    const root = mkdtempSync(join(tmpdir(), 'hwui-global-mcp-compat-'))
+    const manager = new CodingAgentRunManager()
+    try {
+      const mcpPath = join(root, 'mcp.json')
+      writeFileSync(mcpPath, '{"mcpServers":{}}')
+      const launch = { agentId, mode: 'global', args: [] as string[], reasoningEffort: '' }
+      ;(manager as any).getBySession = () => ({ exited: false, launch })
+      expect(manager.isSessionLaunchCompatible('session', { agentId, mode: 'global' })).toBe(false)
+      launch.args = ['--mcp-config', mcpPath]
+      expect(manager.isSessionLaunchCompatible('session', { agentId, mode: 'global' })).toBe(true)
+      rmSync(mcpPath)
+      expect(manager.isSessionLaunchCompatible('session', { agentId, mode: 'global' })).toBe(false)
+    } finally {
+      manager.shutdown()
+      rmSync(root, { recursive: true, force: true })
     }
   })
 
@@ -1543,6 +1633,13 @@ describe('coding agent run state', () => {
       params: { delta: ' Extra.' },
     }))
     ;(manager as any).handleCodexExecLine(run, JSON.stringify({
+      type: 'item.completed',
+      item: {
+        type: 'reasoning',
+        summary: [{ text: 'Need inspect. Then answer. From response item. Extra.' }],
+      },
+    }))
+    ;(manager as any).handleCodexExecLine(run, JSON.stringify({
       method: 'item/agentMessage/delta',
       params: { delta: 'Done.' },
     }))
@@ -1872,12 +1969,16 @@ describe('coding agent run state', () => {
     expect(textMessages.map((message: any) => message.content)).toEqual([openingText, finalText])
     expect(textMessages.at(-1)).toEqual(expect.objectContaining({ finish_reason: 'stop' }))
     const dbMessages = getSessionDetail(chatSessionId)?.messages || []
-    expect(dbMessages.filter(message => message.role === 'assistant' && message.tool_calls?.length)).toHaveLength(1)
-    expect(dbMessages).toContainEqual(expect.objectContaining({
+    const dbToolCallMessages = dbMessages.filter(message => message.role === 'assistant' && message.tool_calls?.length)
+    const dbToolMessage = dbMessages.find(message => message.role === 'tool' && message.tool_call_id === 'cmd-1')
+    expect(dbToolCallMessages).toHaveLength(1)
+    expect(dbToolMessage).toEqual(expect.objectContaining({
       role: 'tool',
       content: 'ai素材\ncache\ngit',
       tool_call_id: 'cmd-1',
+      run_marker: expect.any(String),
     }))
+    expect(dbToolMessage?.run_marker).toBe(dbToolCallMessages[0].run_marker)
     expect(dbMessages).toContainEqual(expect.objectContaining({
       role: 'assistant',
       content: finalText,
@@ -2161,27 +2262,32 @@ describe('coding agent run state', () => {
   })
 })
 
-describe('coding agent chat event mapper', () => {
+describe('response stream chat event mapper', () => {
   it('does not surface raw provider stream events as chat agent events', () => {
-    const mapped = mapCodingAgentResponseEvent({
-      type: 'response.output_text.delta',
-      data: { type: 'response.output_text.delta', delta: 'hello' },
+    const state: any = { messages: [], isWorking: false, events: [], queue: [] }
+    const mapped = applyResponseStreamEvent(state, 'session-1', 'run-1', 'response.output_item.added', {
+      item: { type: 'message', content: [] },
     })
 
-    expect(mapped).toEqual([])
+    expect(mapped).toBeNull()
   })
 
   it('maps reasoning deltas to chat reasoning deltas', () => {
-    expect(mapCodingAgentResponseEvent({
-      type: 'response.reasoning.delta',
-      data: { type: 'response.reasoning.delta', delta: 'thinking' },
-    })).toEqual([{
+    const state: any = { messages: [], isWorking: false, events: [], queue: [] }
+    applyResponseStreamEvent(state, 'session-1', 'run-1', 'response.created', {
+      response: { id: 'resp-1', status: 'in_progress' },
+    })
+
+    expect(applyResponseStreamEvent(state, 'session-1', 'run-1', 'response.reasoning.delta', {
+      delta: 'thinking',
+    })).toEqual({
       event: 'reasoning.delta',
       payload: expect.objectContaining({
         event: 'reasoning.delta',
         delta: 'thinking',
       }),
-    }])
+      runId: 'resp-1',
+    })
   })
 })
 
@@ -2311,6 +2417,82 @@ describe('response stream tool detail events', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('OpenCode JSON stream mapping', () => {
+  it('ignores scoped proxy lifecycle events and accepts native stdout once', () => {
+    const manager = new CodingAgentRunManager()
+    const emitted: Array<{ event: string; payload: any }> = []
+    ;(manager as any).emitToChat = (_sessionId: string, event: string, payload: any) => {
+      emitted.push({ event, payload })
+    }
+    ;(manager as any).ensureDbSession = () => {}
+    const run: any = {
+      id: 'agent-session-opencode-native',
+      launch: {
+        agentSessionId: 'agent-session-opencode-native',
+        agentId: 'opencode',
+        mode: 'scoped',
+        profile: 'default',
+        provider: 'test',
+        model: 'opencode-test',
+        sessionId: 'chat-session-opencode-native',
+        command: 'opencode',
+        args: [],
+        shellCommand: 'opencode',
+        workspaceDir: process.cwd(),
+      },
+      state: { messages: [], isWorking: false, events: [], queue: [] },
+      lastActiveAt: Date.now(),
+      startedAt: Date.now(),
+      exited: false,
+      currentChild: { exitCode: null, signalCode: null, killed: false },
+      printResponseId: 'resp_opencode_native',
+      printMessageId: 'msg_resp_opencode_native',
+      printText: '',
+      printTextStarted: false,
+      printCompleted: false,
+      responseStartEmitted: true,
+      terminalEventHandled: false,
+    }
+    ;(manager as any).runs.set(run.id, run)
+
+    manager.handleResponseEvent(run.id, {
+      type: 'response.output_text.delta',
+      data: { type: 'response.output_text.delta', delta: 'proxy duplicate' },
+    })
+    manager.handleResponseEvent(run.id, {
+      type: 'response.completed',
+      data: {
+        response: {
+          id: 'proxy-step-1',
+          status: 'completed',
+          output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'proxy duplicate' }] }],
+        },
+      },
+    })
+
+    expect(emitted).toEqual([])
+    expect(run.terminalEventHandled).toBe(false)
+    expect(run.state.messages).toEqual([])
+
+    ;(manager as any).handleOpenCodeLine(run, JSON.stringify({
+      type: 'text',
+      sessionID: 'ses_opencode_native',
+      part: { type: 'text', text: '您好！有什么可以帮您？', time: { end: Date.now() } },
+    }))
+    ;(manager as any).handleOpenCodeLine(run, JSON.stringify({
+      type: 'text',
+      sessionID: 'ses_opencode_native',
+      part: { type: 'text', text: '您好！有什么可以帮您？', time: { end: Date.now() } },
+    }))
+
+    expect(emitted.filter(event => event.event === 'message.delta').map(event => event.payload.delta)).toEqual([
+      '您好！有什么可以帮您？',
+    ])
+    expect(run.printText).toBe('您好！有什么可以帮您？')
+    expect(run.launch.agentNativeSessionId).toBe('ses_opencode_native')
   })
 })
 

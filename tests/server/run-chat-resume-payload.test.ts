@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildAppResumeMessagePage,
   buildOutboundToolMessage,
   buildOutboundRunEvent,
   buildResumeEvents,
+  buildResumeMessagePage,
   buildResumeMessages,
+  RESUME_MESSAGE_PAGE_LIMIT,
   RESUME_TOOL_RESULT_DISPLAY_LIMIT,
-} from '../../packages/server/src/services/hermes/run-chat/resume-payload'
+} from '../../packages/server/src/modules/studio/services/chat-run/resume-payload'
 
 function message(overrides: Record<string, unknown>) {
   return {
@@ -19,6 +22,121 @@ function message(overrides: Record<string, unknown>) {
 }
 
 describe('buildResumeMessages', () => {
+  it('returns only the latest display page without trimming runtime history', () => {
+    const history = Array.from({ length: 1_000 }, (_, index) => message({
+      id: index + 1,
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `message-${index + 1}`,
+    }))
+
+    const page = buildResumeMessagePage(history)
+
+    expect(page.messages).toHaveLength(RESUME_MESSAGE_PAGE_LIMIT)
+    expect(page.messages[0].id).toBe(851)
+    expect(page.messages.at(-1)?.id).toBe(1_000)
+    expect(page.messageTotal).toBe(1_000)
+    expect(page.messageLoadedCount).toBe(RESUME_MESSAGE_PAGE_LIMIT)
+    expect(page.hasMoreBefore).toBe(true)
+    expect(history).toHaveLength(1_000)
+    expect(history[0].id).toBe(1)
+  })
+
+  it('keeps the persisted hidden prefix in resume pagination metadata', () => {
+    const inMemoryWindow = Array.from({ length: 160 }, (_, index) => message({
+      id: 851 + index,
+      role: 'user',
+      content: `message-${851 + index}`,
+    }))
+
+    const page = buildResumeMessagePage(inMemoryWindow, {
+      messageTotal: 1_000,
+      messageStateBaselineCount: 150,
+      limit: 150,
+    })
+
+    expect(page.messages).toHaveLength(150)
+    expect(page.messages[0].id).toBe(861)
+    expect(page.messageTotal).toBe(1_010)
+    expect(page.messageLoadedCount).toBe(150)
+    expect(page.hasMoreBefore).toBe(true)
+  })
+
+  it('keeps raw pagination counts when display normalization omitted stored rows', () => {
+    const normalizedWindow = Array.from({ length: 145 }, (_, index) => message({
+      id: 856 + index,
+      role: 'user',
+      content: `message-${856 + index}`,
+    }))
+
+    const page = buildResumeMessagePage(normalizedWindow, {
+      messageTotal: 1_000,
+      messageStateBaselineCount: 145,
+      limit: 150,
+    })
+
+    expect(page.messages).toHaveLength(145)
+    expect(page.messageTotal).toBe(1_000)
+    expect(page.messageLoadedCount).toBe(150)
+    expect(page.hasMoreBefore).toBe(true)
+  })
+
+  it('omits App messages when the supplied cache id still matches', () => {
+    const page = buildResumeMessagePage([
+      message({ id: 1, role: 'user', content: 'hello' }),
+      message({ id: 2, role: 'assistant', content: 'world' }),
+    ])
+
+    const initial = buildAppResumeMessagePage(page, '')
+    const cached = buildAppResumeMessagePage(page, initial.id)
+
+    expect(initial).toMatchObject({
+      messages: page.messages,
+      messagesCached: false,
+    })
+    expect(initial.id).toMatch(/^[a-f0-9]{32}$/)
+    expect(cached).toEqual({
+      id: initial.id,
+      messagesCached: true,
+      messageTotal: 2,
+      messageLoadedCount: 2,
+      messagePageLimit: RESUME_MESSAGE_PAGE_LIMIT,
+      hasMoreBefore: false,
+    })
+  })
+
+  it('returns a new App page when cached message content changed under the same message id', () => {
+    const before = buildAppResumeMessagePage(buildResumeMessagePage([
+      message({ id: 7, role: 'assistant', content: 'partial' }),
+    ]), '')
+    const after = buildAppResumeMessagePage(buildResumeMessagePage([
+      message({ id: 7, role: 'assistant', content: 'complete' }),
+    ]), before.id)
+
+    expect(after.messagesCached).toBe(false)
+    expect(after.id).not.toBe(before.id)
+    expect(after.messages?.[0].content).toBe('complete')
+  })
+
+  it('invalidates the App page cache when only its workspace diff sidecar changes', () => {
+    const page = buildResumeMessagePage([
+      message({ id: 7, role: 'assistant', content: 'complete' }),
+    ])
+    const before = buildAppResumeMessagePage({
+      ...page,
+      workspaceRunChanges: [],
+    }, '')
+    const after = buildAppResumeMessagePage({
+      ...page,
+      workspaceRunChanges: [{ change_id: 'change-1', assistant_message_id: '7' } as any],
+    }, before.id)
+
+    expect(after.messagesCached).toBe(false)
+    expect(after.id).not.toBe(before.id)
+    expect(after.workspaceRunChanges).toEqual([
+      expect.objectContaining({ change_id: 'change-1', assistant_message_id: '7' }),
+    ])
+  })
+
   it('truncates only the outbound tool result without mutating session history', () => {
     const completeResult = 'x'.repeat(4_000)
     const persisted = message({ content: completeResult })
@@ -123,6 +241,35 @@ describe('buildResumeMessages', () => {
     expect(stateEvents[0].data.output).toBe(completeOutput)
   })
 
+  it('computes pending interaction time remaining on the server when replaying a run', () => {
+    const requestedAt = 1_000_000
+    const stateEvents = [
+      {
+        event: 'approval.requested',
+        data: { event: 'approval.requested', approval_id: 'approval-1', timeout_ms: 300_000, requested_at: requestedAt },
+      },
+      {
+        event: 'clarify.requested',
+        data: { event: 'clarify.requested', clarify_id: 'clarify-1', timeout_ms: 120_000, requested_at: requestedAt },
+      },
+    ]
+
+    const outbound = buildResumeEvents(stateEvents, requestedAt + 45_000)
+
+    expect(outbound[0].data.remaining_timeout_ms).toBe(255_000)
+    expect(outbound[1].data.remaining_timeout_ms).toBe(75_000)
+    expect(stateEvents[0].data).not.toHaveProperty('remaining_timeout_ms')
+  })
+
+  it('never returns a negative pending interaction countdown', () => {
+    const outbound = buildResumeEvents([{
+      event: 'approval.requested',
+      data: { event: 'approval.requested', approval_id: 'approval-1', timeout_ms: 1_000, requested_at: 10_000 },
+    }], 15_000)
+
+    expect(outbound[0].data.remaining_timeout_ms).toBe(0)
+  })
+
   it('reuses the display boundary for group-chat tool rows while preserving selected payload tools', () => {
     const completeResult = 'group-result-'.repeat(400)
     const persisted = {
@@ -146,4 +293,19 @@ describe('buildResumeMessages', () => {
     expect(persisted.content).toBe(completeResult)
     expect(workspaceDiff.content).toBe(completeResult)
   })
+})
+
+// Plan state must survive App conditional resumes even when message bodies are cached.
+it('returns plan snapshots on cache hits and changes the cache id after a plan update', () => {
+  const page = buildResumeMessagePage([message({ id: 1, role: 'user', content: 'Work' })])
+  const taskPlans = [{ session_id: 's', run_id: 'r', plan_id: 'r', revision: 1, execution_state: 'running' as const,
+    created_at: 1, updated_at: 1, plan: [{ id: 'a', step: 'Work', status: 'pending' as const }] }]
+  const initial = buildAppResumeMessagePage({ ...page, taskPlans }, '')
+  const cached = buildAppResumeMessagePage({ ...page, taskPlans }, initial.id)
+  expect(cached.messagesCached).toBe(true)
+  expect(cached.messages).toBeUndefined()
+  expect(cached.taskPlans).toEqual(taskPlans)
+  const updated = buildAppResumeMessagePage({ ...page, taskPlans: [{ ...taskPlans[0], revision: 2 }] }, initial.id)
+  expect(updated.messagesCached).toBe(false)
+  expect(updated.id).not.toBe(initial.id)
 })

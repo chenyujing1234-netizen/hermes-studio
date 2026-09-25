@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import DshSessionPresetSelect from "@/components/coding-agents/dsh/DshSessionPresetSelect.vue"
+import { ref, computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provide, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useMessage, NInput, NButton, NSpace, NSelect, NPopconfirm, NInputNumber, NDropdown, NModal, NPopover, NDrawer, NDrawerContent, NSwitch, type DropdownOption } from 'naive-ui'
 import { useGroupChatStore } from '@/stores/hermes/group-chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
-import { getRoomSummary, listStoppedRoomAgentHandoffs, continueRoomAgentHandoff, updateRoomConfig, updateRoomSummary } from '@/api/hermes/group-chat'
+import {
+    createGroupAgentPreset,
+    deleteGroupAgentPreset,
+    getRoomSummary,
+    groupAgentPresetToRoomAgentInput,
+    listGroupAgentPresets,
+    listStoppedRoomAgentHandoffs,
+    continueRoomAgentHandoff,
+    updateGroupAgentPreset,
+    updateRoomConfig,
+    updateRoomSummary,
+} from '@/api/studio/group-chat'
 import {
     decideGroupAgentPairing,
     leaveLocalGroupAgentRoom,
@@ -16,21 +28,37 @@ import {
     updateGuestAgentPolicy,
     type GroupAgentPairingRequest,
     type LocalGroupAgentConnection,
-} from '@/api/hermes/group-chat-agent-link'
+} from '@/api/studio/group-chat-agent-link'
 import GroupMessageList from './GroupMessageList.vue'
 import GroupChatInput from './GroupChatInput.vue'
 import GroupRoomAgentAvatar from './GroupRoomAgentAvatar.vue'
 import MessageQueueFloatPanel from '@/components/hermes/chat/MessageQueueFloatPanel.vue'
+import PendingInteractionCountdown from '@/components/hermes/chat/PendingInteractionCountdown.vue'
 import FolderPicker from '@/components/hermes/chat/FolderPicker.vue'
 import ProfileAvatar from '@/components/hermes/profiles/ProfileAvatar.vue'
 import PageSidebarNav from '@/components/layout/PageSidebarNav.vue'
 import { copyToClipboard } from '@/utils/clipboard'
 import type { Attachment } from '@/stores/hermes/chat'
-import type { GroupChatMention, MemberInfo, RoomAgent, RoomInfo, RoomSummaryAnchor, RoomSummaryConfig, RoomSummaryState } from '@/api/hermes/group-chat'
+import type {
+    GroupAgentPreset,
+    GroupAgentPresetInput,
+    GroupChatMention,
+    MemberInfo,
+    RoomAgent,
+    RoomAgentInput,
+    RoomInfo,
+    RoomSummaryAnchor,
+    RoomSummaryConfig,
+    RoomSummaryState,
+} from '@/api/studio/group-chat'
 import { useFilesStore } from '@/stores/hermes/files'
 import { useToolPanelStore } from '@/stores/hermes/tool-panel'
 import { hasDesktopBrowserBridge } from '@/utils/desktop-bridge'
 import { OPEN_DESKTOP_BROWSER_PANEL_EVENT } from '@/utils/desktop-browser'
+import {
+    createBrowserAnnotationAttachment,
+    type BrowserAnnotationSubmission,
+} from '@/utils/browser-annotation-submit'
 import { canScopedCodingAgentUseProvider } from '@/utils/codingAgentProviders'
 import {
     inferCodingAgentApiMode,
@@ -47,6 +75,11 @@ import { generateGroupChatInviteCode } from '@/utils/group-chat-invite-code'
 import { buildRemoteGroupChatRooms, type RemoteGroupChatRoom } from '@/utils/group-chat-remote-rooms'
 import { handoffErrorTranslationKey } from './handoff-presentation'
 import { clearGroupChatRoomDraft } from './group-chat-room-drafts'
+import {
+    fetchAgentStatusSnapshot,
+    isAgentStatusAvailable,
+    type AgentStatusSnapshot,
+} from '@/api/agent-status'
 
 const FilesPanel = defineAsyncComponent(async () => (await import('@/components/hermes/chat/FilesPanel.vue')).default)
 const FilePreview = defineAsyncComponent(async () => (await import('@/components/hermes/files/FilePreview.vue')).default)
@@ -59,6 +92,7 @@ const props = withDefaults(defineProps<{
 }>(), {
     standalone: false,
 })
+
 const emit = defineEmits<{
     requestAgentLink: []
     requestAgentEdit: [agent: RoomAgent]
@@ -80,7 +114,7 @@ watch(
 )
 const showCreateModal = ref(false)
 const showCloneModal = ref(false)
-const showAddAgentModal = ref(false)
+const showAddAgentDrawer = ref(false)
 const showGroupChatRefactorNotice = ref(false)
 const showManualRoomLinkModal = ref(false)
 const manualRoomLink = ref('')
@@ -88,6 +122,7 @@ const manualRoomLinkInput = ref<HTMLInputElement | null>(null)
 const showMemberRail = ref(true)
 const editingAgent = ref<RoomAgent | null>(null)
 const isSavingAgent = ref(false)
+const agentStatusSnapshot = ref<AgentStatusSnapshot | null>(null)
 const showRoomSettingsModal = ref(false)
 const showUserProfileModal = ref(false)
 const userProfileName = ref('')
@@ -133,15 +168,27 @@ const isSavingGuestAgentPolicy = ref(false)
 let agentPairingRefreshTimer: ReturnType<typeof setInterval> | null = null
 let remoteRoomRefreshTimer: ReturnType<typeof setInterval> | null = null
 const selectedAgentType = ref<GroupAgentType>('hermes')
+const selectedAgentMode = ref<'scoped' | 'global'>('scoped')
 const selectedProfile = ref<string | null>(null)
 const selectedAgentProvider = ref('')
 const selectedAgentModel = ref('')
 const selectedAgentApiMode = ref<CodingAgentApiMode>('codex_responses')
 const selectedAgentReasoningEffort = ref('')
+const selectedRuntimePreset = ref<string>()
+const selectedRuntimePresetReady = ref(false)
 const agentName = ref('')
 const agentDescription = ref('')
 const agentAvatar = ref<ProfileAvatarData | null>(null)
 const agentAvatarFileInput = ref<HTMLInputElement | null>(null)
+const agentPresets = ref<GroupAgentPreset[]>([])
+const selectedAgentPresetId = ref<string | null>(null)
+const showAgentPresetDialog = ref(false)
+const agentPresetDialogMode = ref<'select' | 'manage'>('select')
+const agentPresetSearch = ref('')
+const pendingAgentPresetId = ref<string | null>(null)
+const isLoadingAgentPresets = ref(false)
+const agentPresetLoadError = ref('')
+const isSavingAgentPreset = ref(false)
 const cloneSourceRoomId = ref<string | null>(null)
 const cloneRoomName = ref('')
 const cloneInviteCode = ref('')
@@ -188,15 +235,57 @@ const profileOptions = computed(() =>
     profilesStore.profiles.map(p => ({ label: p.name, value: p.name }))
 )
 
-type GroupAgentType = 'hermes' | 'ekko' | 'codex' | 'claude' | 'pi'
+type GroupAgentType = 'hermes' | 'ekko' | 'codex' | 'claude' | 'pi' | 'grok' | 'opencode' | 'dsh'
 
-const groupAgentTypeOptions = computed<Array<{ label: string; value: GroupAgentType }>>(() => [
+const groupAgentTypeDefinitions: Array<{ label: string; value: GroupAgentType }> = [
     { label: 'Hermes', value: 'hermes' },
     { label: 'Ekko', value: 'ekko' },
     { label: 'Claude', value: 'claude' },
     { label: 'Codex', value: 'codex' },
     { label: 'Pi', value: 'pi' },
+    { label: 'Grok', value: 'grok' },
+    { label: 'OpenCode', value: 'opencode' },
+  { label: 'DeepSeek Harness', value: 'dsh' },
+]
+
+const groupAgentTypeOptions = computed(() => groupAgentTypeDefinitions.map((option) => {
+    const disabled = !isAgentStatusAvailable(agentStatusSnapshot.value, option.value)
+    return {
+        ...option,
+        disabled,
+        label: disabled ? `${option.label} · ${t('codingAgents.notInstalled')}` : option.label,
+    }
+}))
+
+const firstAvailableGroupAgentType = computed<GroupAgentType | null>(() =>
+    groupAgentTypeOptions.value.find(option => !option.disabled)?.value || null
+)
+const supportsGlobalAgentMode = computed(() => ['claude', 'codex', 'pi', 'grok', 'opencode', 'dsh'].includes(selectedAgentType.value))
+const usesGlobalAgentMode = computed(() => supportsGlobalAgentMode.value && selectedAgentMode.value === 'global')
+const agentModeOptions = computed(() => [
+    { label: t('codingAgents.launchModeGlobal'), value: 'global' },
+    { label: t('codingAgents.launchModeScoped'), value: 'scoped' },
 ])
+
+function groupAgentDisplayName(agent: GroupAgentType): string {
+    return groupAgentTypeDefinitions.find(option => option.value === agent)?.label || agent
+}
+
+function isGroupAgentAvailable(agent: GroupAgentType): boolean {
+    return isAgentStatusAvailable(agentStatusSnapshot.value, agent)
+}
+
+function warnAgentUnavailable(agent: GroupAgentType) {
+    message.warning(t('codingAgents.installRequired', { agent: groupAgentDisplayName(agent) }))
+}
+
+async function refreshAgentAvailability() {
+    try {
+        agentStatusSnapshot.value = await fetchAgentStatusSnapshot()
+    } catch {
+        agentStatusSnapshot.value = null
+    }
+}
 
 function getAgentModelGroups(profile: string) {
     return (appStore.profileModelGroups.find(entry => entry.profile === profile)?.groups || [])
@@ -209,7 +298,11 @@ function getAgentModelGroups(profile: string) {
                     ? 'claude-code'
                     : selectedAgentType.value === 'pi'
                         ? 'pi'
-                        : 'codex'
+                        : selectedAgentType.value === 'grok'
+                            ? 'grok'
+                            : selectedAgentType.value === 'dsh' ? 'dsh' : selectedAgentType.value === 'opencode'
+                                ? 'opencode'
+                            : 'codex'
             return canScopedCodingAgentUseProvider(codingAgentId, group.provider)
         })
 }
@@ -260,6 +353,24 @@ const agentApiModeOptions = computed(() => [
     { label: t('codingAgents.protocolOpenAiResponses'), value: 'codex_responses' },
     { label: t('codingAgents.protocolAnthropicMessages'), value: 'anthropic_messages' },
 ])
+const filteredAgentPresets = computed(() => {
+    const query = agentPresetSearch.value.trim().toLocaleLowerCase()
+    if (!query) return agentPresets.value
+    return agentPresets.value.filter((preset) => {
+        const searchable = [
+            preset.name,
+            preset.description,
+            preset.profile,
+            preset.provider,
+            preset.model,
+            preset.validationError,
+        ].join(' ').toLocaleLowerCase()
+        return searchable.includes(query)
+    })
+})
+const pendingAgentPreset = computed(() =>
+    agentPresets.value.find(preset => preset.id === pendingAgentPresetId.value) || null
+)
 
 const agentReasoningEffortOptions = computed(() => [
     { label: t('chat.reasoningEffort.options.default'), value: '' },
@@ -296,7 +407,8 @@ const summaryApiModeOptions = computed(() => [
 ])
 const liveRoomSummaryState = computed(() => {
     const roomId = store.currentRoomId
-    return (roomId && store.roomSummaryStates.get(roomId)) || roomSummaryState.value
+    return (roomId && store.roomSummaryStates.get(roomId))
+        || (roomSummaryState.value?.roomId === roomId ? roomSummaryState.value : null)
 })
 
 function clearInlineSummaryStatusTimer() {
@@ -328,6 +440,8 @@ watch(
                 status: 'summarizing',
                 error: '',
             }
+        } else if (state.status === 'idle') {
+            hideInlineSummaryStatus()
         } else if (
             (state.status === 'success' || state.status === 'failed')
             && inlineSummaryStatus.value?.roomId === state.roomId
@@ -340,18 +454,21 @@ watch(
             }
             clearInlineSummaryStatusTimer()
             const completedRoomId = state.roomId
-            inlineSummaryStatusTimer = setTimeout(() => {
+            const timer = setTimeout(() => {
+                if (inlineSummaryStatusTimer !== timer) return
                 if (inlineSummaryStatus.value?.roomId === completedRoomId) {
                     inlineSummaryStatus.value = null
                 }
                 inlineSummaryStatusTimer = null
             }, state.status === 'failed' ? 6000 : 3000)
+            inlineSummaryStatusTimer = timer
         }
         if (!showRoomSettingsModal.value) return
         roomSummaryState.value = state
         if (state.status === 'success') roomSummaryDraft.value = state.summary
         try {
-            roomSummaryAnchor.value = (await getRoomSummary(state.roomId)).anchor
+            const result = await getRoomSummary(state.roomId)
+            if (store.currentRoomId === state.roomId) roomSummaryAnchor.value = result.anchor
         } catch { /* the next settings open refreshes it */ }
     },
     { flush: 'sync' },
@@ -373,10 +490,14 @@ const agentAvatarPreview = computed(() =>
 
 const canConfirmAddAgent = computed(() =>
     Boolean(
+        isGroupAgentAvailable(selectedAgentType.value) &&
+        (selectedAgentType.value !== 'dsh' || (selectedRuntimePreset.value && selectedRuntimePresetReady.value)) &&
         selectedProfile.value &&
-        selectedAgentProvider.value &&
-        selectedAgentModel.value &&
-        (selectedAgentType.value === 'hermes' || selectedAgentApiMode.value),
+        (usesGlobalAgentMode.value || (
+            selectedAgentProvider.value &&
+            selectedAgentModel.value &&
+            (selectedAgentType.value === 'hermes' || selectedAgentApiMode.value)
+        )),
     )
 )
 
@@ -392,6 +513,7 @@ function syncAgentModelSelection(profile: string) {
     const defaults = getDefaultAgentModel(profile)
     selectedAgentProvider.value = defaults.provider
     selectedAgentModel.value = defaults.model
+    selectedAgentReasoningEffort.value = ''
     syncAgentApiMode()
 }
 
@@ -401,14 +523,32 @@ function handleAgentProfileChange(profile: string) {
 }
 
 function handleAgentTypeChange(agent: GroupAgentType) {
+    if (!isGroupAgentAvailable(agent)) {
+        warnAgentUnavailable(agent)
+        return
+    }
+    selectedRuntimePreset.value = undefined
+    selectedRuntimePresetReady.value = false
     selectedAgentType.value = agent
+    if (!['claude', 'codex', 'pi', 'grok', 'opencode', 'dsh'].includes(agent)) selectedAgentMode.value = 'scoped'
     if (selectedProfile.value) syncAgentModelSelection(selectedProfile.value)
+}
+
+function handleAgentModeChange(mode: 'scoped' | 'global') {
+    selectedAgentMode.value = mode
+    selectedAgentPresetId.value = null
 }
 
 function handleAgentProviderChange(provider: string) {
     selectedAgentProvider.value = provider
     selectedAgentModel.value = agentModelOptions.value[0]?.value || ''
+    selectedAgentReasoningEffort.value = ''
     syncAgentApiMode()
+}
+
+function handleAgentModelChange(model: string) {
+    selectedAgentModel.value = model
+    selectedAgentReasoningEffort.value = ''
 }
 
 function agentAvatarName(agent: RoomAgent): string {
@@ -480,6 +620,7 @@ function canManageRoom(room: Pick<RoomInfo, 'canManage'> | null | undefined): bo
     return room?.canManage === true
 }
 const currentRoomCanManage = computed(() => !props.standalone && canManageRoom(currentRoom.value))
+provide('hermesWorkspaceFilePreview', currentRoomCanManage)
 const currentRoomCanMentionAll = computed(() => !props.standalone && currentRoom.value?.canMentionAll === true)
 const currentRoomNeedsSummaryConfiguration = computed(() => {
     if (props.standalone) return false
@@ -724,8 +865,20 @@ function handleOpenDesktopBrowserPanelRequest(): void {
     selectWorkspacePanel('browser')
 }
 
-function handleBrowserAttachment(payload: { file: File }): void {
-    groupChatInputRef.value?.addFiles?.([payload.file])
+async function submitBrowserAnnotations(payload: BrowserAnnotationSubmission): Promise<boolean> {
+    if (currentRoomNeedsSummaryConfiguration.value) {
+        await handleSummaryConfigurationRequired()
+        return false
+    }
+    const attachment = createBrowserAnnotationAttachment(payload)
+    try {
+        await store.sendMessage('', [attachment])
+        return true
+    } catch (err: any) {
+        URL.revokeObjectURL(attachment.url)
+        message.error(err instanceof Error ? err.message : String(err))
+        return false
+    }
 }
 
 function groupWorkspacePreviewPath(filePath: string): string | null {
@@ -744,15 +897,57 @@ function groupWorkspacePreviewPath(filePath: string): string | null {
 }
 
 function handleWorkspaceFilePreviewRequest(event: Event): void {
-    const customEvent = event as CustomEvent<{ path?: string; fileName?: string }>
+    const customEvent = event as CustomEvent<{
+        path?: string
+        fileName?: string
+        startLine?: number
+        endLine?: number
+    }>
     const roomId = store.currentRoomId
     const path = groupWorkspacePreviewPath(typeof customEvent.detail?.path === 'string' ? customEvent.detail.path : '')
     if (!roomId || !path || !currentRoomCanManage.value) return
     customEvent.preventDefault()
     const fileName = customEvent.detail?.fileName || path.split('/').pop() || path
+    const requestedStartLine = customEvent.detail?.startLine
+    const startLine = Number.isInteger(requestedStartLine) && requestedStartLine! > 0
+        ? requestedStartLine
+        : undefined
+    const requestedEndLine = customEvent.detail?.endLine
+    const endLine = startLine && Number.isInteger(requestedEndLine) && requestedEndLine! >= startLine
+        ? requestedEndLine
+        : startLine
     toolPanelStore.closeWorkspaceDiff()
     filesStore.closePreview()
-    void filesStore.openGroupWorkspacePreview(roomId, path, fileName).catch(error => {
+    void filesStore.openGroupWorkspacePreview(
+        roomId,
+        path,
+        fileName,
+        -1,
+        startLine ? { startLine, endLine } : undefined,
+    ).catch(error => {
+        message.error(error instanceof Error ? error.message : t('files.previewFailed'))
+    })
+}
+
+function handleGroupAttachmentPreviewRequest(event: Event): void {
+    const customEvent = event as CustomEvent<{ sourceUrl?: string; fileName?: string; size?: number }>
+    const roomId = store.currentRoomId
+    const sourceUrl = String(customEvent.detail?.sourceUrl || '').trim()
+    const fileName = String(customEvent.detail?.fileName || '').trim()
+    if (!roomId || !sourceUrl || !fileName) return
+    customEvent.preventDefault()
+    toolPanelStore.closeWorkspaceDiff()
+    filesStore.closePreview()
+    void filesStore.openRemotePreview(
+        sourceUrl,
+        fileName,
+        Number(customEvent.detail?.size ?? -1),
+        { workspaceRoomId: roomId },
+    ).then(opened => {
+        if (!opened) return
+        activeWorkspacePanel.value = 'files'
+        showWorkspacePanel.value = true
+    }).catch(error => {
         message.error(error instanceof Error ? error.message : t('files.previewFailed'))
     })
 }
@@ -867,13 +1062,21 @@ function extractApiErrorMessage(err: any): string {
     return raw || t('common.saveFailed')
 }
 
-async function handleCreateRoom(name: string, inviteCode: string, userName: string, description: string, summary: RoomSummaryConfig, workspace: string) {
+async function handleCreateRoom(
+    name: string,
+    inviteCode: string,
+    userName: string,
+    description: string,
+    summary: RoomSummaryConfig,
+    workspace: string,
+    agents: RoomAgentInput[],
+) {
     try {
         store.setUserInfo(userName, description)
         const res = await store.createNewRoom(
             name,
             inviteCode,
-            undefined,
+            agents,
             summary,
             workspace,
             { name: userName, description },
@@ -1128,8 +1331,12 @@ async function handleSummaryConfigurationRequired() {
 }
 
 function resetAgentForm() {
+    selectedAgentPresetId.value = null
     selectedProfile.value = null
-    selectedAgentType.value = 'hermes'
+    selectedRuntimePreset.value = undefined
+    selectedRuntimePresetReady.value = false
+    selectedAgentType.value = firstAvailableGroupAgentType.value || 'hermes'
+    selectedAgentMode.value = 'scoped'
     selectedAgentProvider.value = ''
     selectedAgentModel.value = ''
     selectedAgentApiMode.value = 'codex_responses'
@@ -1139,8 +1346,147 @@ function resetAgentForm() {
     agentAvatar.value = null
 }
 
-function closeAgentModal() {
-    showAddAgentModal.value = false
+function currentAgentPresetInput(): GroupAgentPresetInput | null {
+    if (!canConfirmAddAgent.value || !selectedProfile.value) return null
+    return {
+        agent: selectedAgentType.value,
+        agentMode: usesGlobalAgentMode.value ? 'global' : 'scoped',
+        profile: selectedProfile.value,
+        provider: usesGlobalAgentMode.value ? '' : selectedAgentProvider.value,
+        model: usesGlobalAgentMode.value ? '' : selectedAgentModel.value,
+        apiMode: selectedAgentType.value === 'hermes' || usesGlobalAgentMode.value ? '' : selectedAgentApiMode.value,
+        reasoningEffort: usesGlobalAgentMode.value ? '' : selectedAgentReasoningEffort.value,
+        agentPreset: selectedAgentType.value === 'dsh' ? selectedRuntimePreset.value : undefined,
+        name: agentName.value.trim() || selectedProfile.value,
+        description: agentDescription.value.trim(),
+        avatar: agentAvatar.value ? JSON.stringify(agentAvatar.value) : '',
+    }
+}
+
+async function loadAgentPresets() {
+    isLoadingAgentPresets.value = true
+    agentPresetLoadError.value = ''
+    try {
+        agentPresets.value = (await listGroupAgentPresets()).presets
+    } catch (err: any) {
+        agentPresetLoadError.value = extractApiErrorMessage(err) || t('groupChat.agentPresetLoadFailed')
+        message.error(agentPresetLoadError.value)
+    } finally {
+        isLoadingAgentPresets.value = false
+    }
+}
+
+function openAgentPresetSelection() {
+    agentPresetDialogMode.value = 'select'
+    pendingAgentPresetId.value = selectedAgentPresetId.value
+    agentPresetSearch.value = ''
+    showAgentPresetDialog.value = true
+}
+
+function openAgentPresetManager() {
+    agentPresetDialogMode.value = 'manage'
+    pendingAgentPresetId.value = null
+    agentPresetSearch.value = ''
+    showAgentPresetDialog.value = true
+}
+
+function closeAgentPresetDialog() {
+    showAgentPresetDialog.value = false
+    pendingAgentPresetId.value = null
+    agentPresetSearch.value = ''
+}
+
+function selectAgentPresetForDialog(preset: GroupAgentPreset) {
+    if (!preset.available) return
+    pendingAgentPresetId.value = preset.id
+}
+
+function confirmAgentPresetSelection() {
+    const preset = pendingAgentPreset.value
+    if (!preset?.available) return
+    applyAgentPreset(preset.id)
+    closeAgentPresetDialog()
+}
+
+function applyAgentPreset(presetId: string | null) {
+    selectedAgentPresetId.value = presetId
+    const preset = agentPresets.value.find(item => item.id === presetId)
+    if (!preset) return
+    if (!preset.available) {
+        message.warning(preset.validationError || t('groupChat.agentPresetUnavailable'))
+        return
+    }
+    const input = groupAgentPresetToRoomAgentInput(preset)
+    selectedAgentType.value = input.agent
+    selectedAgentMode.value = input.agentMode === 'global' ? 'global' : 'scoped'
+    selectedProfile.value = input.profile
+    selectedAgentProvider.value = input.provider || ''
+    selectedAgentModel.value = input.model || ''
+    selectedAgentApiMode.value = normalizeCodingAgentApiMode(
+        input.apiMode,
+        inferCodingAgentApiMode(input.provider),
+    )
+    selectedAgentReasoningEffort.value = input.reasoningEffort || ''
+    selectedRuntimePreset.value = input.agentPreset
+    agentName.value = input.name || ''
+    agentDescription.value = input.description || ''
+    agentAvatar.value = parseStoredAvatar(input.avatar)
+}
+
+async function saveAgentPreset(presetId: string | null) {
+    const input = currentAgentPresetInput()
+    if (!input || isSavingAgentPreset.value) return
+    isSavingAgentPreset.value = true
+    try {
+        const result = presetId
+            ? await updateGroupAgentPreset(presetId, input)
+            : await createGroupAgentPreset(input)
+        const index = agentPresets.value.findIndex(item => item.id === result.preset.id)
+        if (index >= 0) agentPresets.value[index] = result.preset
+        else agentPresets.value = [result.preset, ...agentPresets.value]
+        pendingAgentPresetId.value = result.preset.id
+        message.success(t('groupChat.agentPresetSaved'))
+    } catch (err: any) {
+        message.error(
+            err?.code === 'GROUP_AGENT_PRESET_NAME_CONFLICT'
+                ? t('groupChat.agentPresetAlreadyExists')
+                : extractApiErrorMessage(err) || t('groupChat.agentPresetOperationFailed'),
+        )
+    } finally {
+        isSavingAgentPreset.value = false
+    }
+}
+
+async function createAgentPresetFromCurrent() {
+    pendingAgentPresetId.value = null
+    await saveAgentPreset(null)
+}
+
+async function updateSelectedAgentPreset() {
+    if (!pendingAgentPresetId.value) return
+    await saveAgentPreset(pendingAgentPresetId.value)
+}
+
+async function deleteAgentPreset() {
+    const presetId = pendingAgentPresetId.value
+    if (!presetId || isSavingAgentPreset.value) return
+    isSavingAgentPreset.value = true
+    try {
+        await deleteGroupAgentPreset(presetId)
+        agentPresets.value = agentPresets.value.filter(item => item.id !== presetId)
+        if (selectedAgentPresetId.value === presetId) selectedAgentPresetId.value = null
+        pendingAgentPresetId.value = null
+        message.success(t('groupChat.agentPresetDeleted'))
+    } catch (err: any) {
+        message.error(extractApiErrorMessage(err) || t('groupChat.agentPresetOperationFailed'))
+    } finally {
+        isSavingAgentPreset.value = false
+    }
+}
+
+function closeAgentDrawer() {
+    closeAgentPresetDialog()
+    showAddAgentDrawer.value = false
     editingAgent.value = null
     resetAgentForm()
 }
@@ -1150,10 +1496,14 @@ async function handleAddAgent() {
     await Promise.all([
         profilesStore.fetchProfiles(),
         appStore.loadModels(),
+        loadAgentPresets(),
+        refreshAgentAvailability(),
     ])
     editingAgent.value = null
     resetAgentForm()
-    selectedAgentType.value = 'hermes'
+    selectedRuntimePreset.value = undefined
+    selectedRuntimePresetReady.value = false
+    selectedAgentType.value = firstAvailableGroupAgentType.value || 'hermes'
     selectedProfile.value =
         profilesStore.activeProfileName ||
         profilesStore.profiles.find(profile => profile.active)?.name ||
@@ -1161,7 +1511,7 @@ async function handleAddAgent() {
         'default'
     syncAgentModelSelection(selectedProfile.value)
     selectedAgentReasoningEffort.value = ''
-    showAddAgentModal.value = true
+    showAddAgentDrawer.value = true
 }
 
 function randomAgentAvatarSeed() {
@@ -1211,9 +1561,13 @@ async function handleEditAgent(agent: RoomAgent) {
     await Promise.all([
         profilesStore.fetchProfiles(),
         appStore.loadModels(),
+        loadAgentPresets(),
+        refreshAgentAvailability(),
     ])
+    selectedAgentPresetId.value = null
     editingAgent.value = agent
     selectedAgentType.value = agent.agent || 'hermes'
+    selectedAgentMode.value = agent.agentMode === 'global' ? 'global' : 'scoped'
     selectedProfile.value = agent.profile
     selectedAgentProvider.value = agent.provider || ''
     selectedAgentModel.value = agent.model || ''
@@ -1222,13 +1576,15 @@ async function handleEditAgent(agent: RoomAgent) {
         inferCodingAgentApiMode(agent.provider),
     )
     selectedAgentReasoningEffort.value = agent.reasoningEffort || ''
+    selectedRuntimePreset.value = agent.agentPreset
     agentName.value = agent.name || ''
     agentDescription.value = agent.description || ''
     agentAvatar.value = parseStoredAvatar(agent.avatar)
-    showAddAgentModal.value = true
+    showAddAgentDrawer.value = true
 }
 
 onMounted(() => {
+    if (!props.standalone) void refreshAgentAvailability()
     if (!props.standalone) {
         try {
             showGroupChatRefactorNotice.value = window.localStorage.getItem(GROUP_CHAT_REFACTOR_NOTICE_STORAGE_KEY) !== '1'
@@ -1238,6 +1594,7 @@ onMounted(() => {
     }
     window.addEventListener('hermes:open-page-sidebar', openPageSidebar)
     window.addEventListener('hermes:preview-workspace-file', handleWorkspaceFilePreviewRequest)
+    window.addEventListener('hermes:preview-group-attachment', handleGroupAttachmentPreviewRequest)
     window.addEventListener(OPEN_DESKTOP_BROWSER_PANEL_EVENT, handleOpenDesktopBrowserPanelRequest)
     window.addEventListener('resize', handleWorkspacePanelResize)
     window.addEventListener('focus', handleWindowFocus)
@@ -1257,6 +1614,7 @@ onUnmounted(() => {
     hideInlineSummaryStatus()
     window.removeEventListener('hermes:open-page-sidebar', openPageSidebar)
     window.removeEventListener('hermes:preview-workspace-file', handleWorkspaceFilePreviewRequest)
+    window.removeEventListener('hermes:preview-group-attachment', handleGroupAttachmentPreviewRequest)
     window.removeEventListener(OPEN_DESKTOP_BROWSER_PANEL_EVENT, handleOpenDesktopBrowserPanelRequest)
     window.removeEventListener('resize', handleWorkspacePanelResize)
     window.removeEventListener('focus', handleWindowFocus)
@@ -1274,10 +1632,7 @@ onUnmounted(() => {
 async function loadRoomSummaryState(roomId: string) {
     try {
         const result = await getRoomSummary(roomId)
-        const existing = store.roomSummaryStates.get(roomId)
-        if (!existing || result.summary.version >= existing.version) {
-            store.roomSummaryStates.set(roomId, result.summary)
-        }
+        store.applyRoomSummaryState(result.summary)
         if (store.currentRoomId !== roomId) return
         roomSummaryState.value = store.roomSummaryStates.get(roomId) || result.summary
         roomSummaryAnchor.value = result.anchor
@@ -1289,14 +1644,14 @@ async function loadRoomSummaryState(roomId: string) {
 
 watch(() => store.currentRoomId, (roomId, previousRoomId) => {
     if (roomId === previousRoomId) return
-    hideInlineSummaryStatus()
+    if (inlineSummaryStatus.value?.roomId !== roomId) hideInlineSummaryStatus()
     roomSummaryState.value = null
     roomSummaryAnchor.value = null
     roomSummaryDraft.value = ''
     if (filesStore.previewFile || toolPanelStore.workspaceDiff || showWorkspacePanel.value) closeWorkspacePanel()
     if (roomId && !props.standalone) void loadRoomSummaryState(roomId)
     if (!props.standalone) void refreshPendingAgentPairings()
-}, { immediate: true })
+}, { immediate: true, flush: 'sync' })
 
 watch(() => store.agentPairingRevision, () => {
     if (!props.standalone) void refreshPendingAgentPairings()
@@ -1351,21 +1706,28 @@ async function confirmAddAgent() {
         message.warning(t('groupChat.selectRoomFirst'))
         return
     }
+    if (!isGroupAgentAvailable(selectedAgentType.value)) {
+        warnAgentUnavailable(selectedAgentType.value)
+        return
+    }
     if (!canConfirmAddAgent.value || !selectedProfile.value || isSavingAgent.value) return
     isSavingAgent.value = true
     try {
         await store.addAgentToRoom(store.currentRoomId, {
+            presetId: selectedAgentPresetId.value || undefined,
             agent: selectedAgentType.value,
+            agentMode: usesGlobalAgentMode.value ? 'global' : 'scoped',
             profile: selectedProfile.value,
-            provider: selectedAgentProvider.value,
-            model: selectedAgentModel.value,
-            apiMode: selectedAgentType.value === 'hermes' ? undefined : selectedAgentApiMode.value,
-            reasoningEffort: selectedAgentReasoningEffort.value,
+            provider: usesGlobalAgentMode.value ? '' : selectedAgentProvider.value,
+            model: usesGlobalAgentMode.value ? '' : selectedAgentModel.value,
+            apiMode: selectedAgentType.value === 'hermes' || usesGlobalAgentMode.value ? undefined : selectedAgentApiMode.value,
+            reasoningEffort: usesGlobalAgentMode.value ? '' : selectedAgentReasoningEffort.value,
+            agentPreset: selectedAgentType.value === 'dsh' ? selectedRuntimePreset.value : undefined,
             name: agentName.value.trim() || undefined,
             description: agentDescription.value.trim() || undefined,
             avatar: agentAvatar.value ? JSON.stringify(agentAvatar.value) : '',
         })
-        closeAgentModal()
+        closeAgentDrawer()
         message.success(t('groupChat.agentAdded'))
     } catch (err: any) {
         if (err.message?.includes('already')) {
@@ -1380,21 +1742,27 @@ async function confirmAddAgent() {
 
 async function confirmUpdateAgent() {
     if (!store.currentRoomId || !editingAgent.value) return
+    if (!isGroupAgentAvailable(selectedAgentType.value)) {
+        warnAgentUnavailable(selectedAgentType.value)
+        return
+    }
     if (!canConfirmAddAgent.value || !selectedProfile.value || isSavingAgent.value) return
     isSavingAgent.value = true
     try {
         await store.updateAgentInRoom(store.currentRoomId, editingAgent.value.id, {
             agent: selectedAgentType.value,
+            agentMode: usesGlobalAgentMode.value ? 'global' : 'scoped',
             profile: selectedProfile.value,
-            provider: selectedAgentProvider.value,
-            model: selectedAgentModel.value,
-            apiMode: selectedAgentType.value === 'hermes' ? undefined : selectedAgentApiMode.value,
-            reasoningEffort: selectedAgentReasoningEffort.value,
+            provider: usesGlobalAgentMode.value ? '' : selectedAgentProvider.value,
+            model: usesGlobalAgentMode.value ? '' : selectedAgentModel.value,
+            apiMode: selectedAgentType.value === 'hermes' || usesGlobalAgentMode.value ? undefined : selectedAgentApiMode.value,
+            reasoningEffort: usesGlobalAgentMode.value ? '' : selectedAgentReasoningEffort.value,
+            agentPreset: selectedAgentType.value === 'dsh' ? selectedRuntimePreset.value : undefined,
             name: agentName.value.trim() || undefined,
             description: agentDescription.value.trim() || undefined,
             avatar: agentAvatar.value ? JSON.stringify(agentAvatar.value) : '',
         })
-        closeAgentModal()
+        closeAgentDrawer()
         message.success(t('common.saved'))
     } catch (err: any) {
         message.error(extractApiErrorMessage(err))
@@ -1485,14 +1853,16 @@ async function handleOpenRoomSettings() {
         store.handoffChains = new Map()
     }
     if (!store.currentRoomId) return
+    const summaryRoomId = store.currentRoomId
     void refreshPendingAgentPairings()
     isLoadingRoomSummary.value = true
     try {
-        const result = await getRoomSummary(store.currentRoomId)
-        roomSummaryState.value = result.summary
+        const result = await getRoomSummary(summaryRoomId)
+        store.applyRoomSummaryState(result.summary)
+        if (store.currentRoomId !== summaryRoomId) return
+        roomSummaryState.value = store.roomSummaryStates.get(summaryRoomId) || result.summary
         roomSummaryAnchor.value = result.anchor
-        roomSummaryDraft.value = result.summary.summary
-        store.roomSummaryStates.set(store.currentRoomId, result.summary)
+        roomSummaryDraft.value = roomSummaryState.value.summary
     } catch (err: any) {
         message.error(err?.message || t('groupChat.summaryLoadFailed'))
     } finally {
@@ -1682,7 +2052,7 @@ async function handleRemoveAgent(agent: RoomAgent) {
     try {
         await store.removeAgentFromRoom(store.currentRoomId, agent.id)
         if (editingAgent.value && (editingAgent.value.id === agent.id || editingAgent.value.agentId === agent.agentId)) {
-            closeAgentModal()
+            closeAgentDrawer()
         }
     } catch {
         message.error(t('common.deleteFailed'))
@@ -1875,8 +2245,11 @@ function handleClarifyKeydown(event: KeyboardEvent) {
             <div class="chat-header">
                 <div class="header-left">
                     <button v-if="!props.standalone" class="icon-btn header-sidebar-toggle" @click="toggleSidebar">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="9" y1="3" x2="9" y2="21" />
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="3" y="3" width="7" height="7" />
+                            <rect x="14" y="3" width="7" height="7" />
+                            <rect x="3" y="14" width="7" height="7" />
+                            <rect x="14" y="14" width="7" height="7" />
                         </svg>
                     </button>
                     <span class="room-title-text">{{ store.roomName || (store.currentRoomId || t('groupChat.title')) }}</span>
@@ -2146,6 +2519,7 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                                         </svg>
                                     </span>
                                     <span>{{ t('chat.approvalKicker') }}</span>
+                                    <PendingInteractionCountdown :deadline="visibleApproval.countdownDeadline" />
                                 </div>
                                 <div class="approval-float-title">
                                     <span v-if="visibleApproval.agentName">@{{ visibleApproval.agentName }} · </span>{{ t('chat.approvalTitle') }}
@@ -2179,6 +2553,7 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                                         </svg>
                                     </span>
                                     <span>{{ t('chat.clarifyKicker') }}</span>
+                                    <PendingInteractionCountdown :deadline="visibleClarify.countdownDeadline" />
                                 </div>
                                 <div class="approval-float-title">
                                     <span v-if="visibleClarify.agentName">@{{ visibleClarify.agentName }} · </span>{{ t('chat.clarifyTitle') }}
@@ -2299,10 +2674,6 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                                 v-if="toolPanelStore.workspaceDiff"
                                 :custom-close="closeWorkspacePanel"
                             />
-                            <FilePreview
-                                v-else-if="filesStore.previewFile?.workspaceRoomId === store.currentRoomId"
-                                :custom-close="closeWorkspacePanel"
-                            />
                             <template v-else>
                                 <div class="group-tool-tabs" role="tablist">
                                     <button
@@ -2362,6 +2733,10 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                                             @attach="handleWorkspaceFileAttach"
                                         />
                                     </template>
+                                    <FilePreview
+                                        v-else-if="filesStore.previewFile?.workspaceRoomId === store.currentRoomId"
+                                        :custom-close="closeWorkspacePanel"
+                                    />
                                     <div v-else-if="activeWorkspacePanel === 'files'" class="group-workspace-empty">
                                         <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
                                             <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -2380,7 +2755,7 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                                         v-if="desktopBrowserAvailable && activeWorkspacePanel === 'browser'"
                                         class="group-browser-panel"
                                         :visible="toolPanelTransitionReady"
-                                        @attach="handleBrowserAttachment"
+                                        :submit="submitBrowserAnnotations"
                                     />
                                 </div>
                             </template>
@@ -2405,10 +2780,32 @@ function handleClarifyKeydown(event: KeyboardEvent) {
             </NDrawerContent>
         </NDrawer>
 
-        <Teleport to="body">
-            <div v-if="showAddAgentModal" class="modal-backdrop" @click.self="closeAgentModal">
-                <div class="modal">
-                    <h3>{{ editingAgent ? t('groupChat.editAgentTitle', { name: editingAgent.name }) : t('groupChat.addAgent') }}</h3>
+        <NDrawer
+            :show="showAddAgentDrawer"
+            placement="right"
+            :width="workspacePanelMobile ? '100%' : 520"
+            :z-index="1000"
+            :mask-closable="!isSavingAgent"
+            :close-on-esc="!isSavingAgent && !showAgentPresetDialog"
+            :trap-focus="!showAgentPresetDialog"
+            @update:show="!$event && closeAgentDrawer()"
+        >
+            <NDrawerContent
+                :title="editingAgent ? t('groupChat.editAgentTitle', { name: editingAgent.name }) : t('groupChat.addAgent')"
+                :closable="!isSavingAgent"
+            >
+                    <div v-if="!editingAgent" class="agent-preset-entry">
+                        <NButton secondary block @click="openAgentPresetSelection">
+                            {{ t('groupChat.chooseAgentPreset') }}
+                        </NButton>
+                        <p class="form-hint">{{ t('groupChat.agentPresetSnapshotHint') }}</p>
+                    </div>
+                    <div v-if="editingAgent" class="agent-preset-entry">
+                        <NButton secondary block @click="openAgentPresetManager">
+                            {{ t('groupChat.manageAgentPresets') }}
+                        </NButton>
+                        <p class="form-hint">{{ t('groupChat.agentPresetSnapshotHint') }}</p>
+                    </div>
                     <div class="group-agent-avatar-editor">
                         <ProfileAvatar
                             :name="selectedAgentType"
@@ -2456,7 +2853,18 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                             @update:value="handleAgentProfileChange"
                         />
                     </div>
-                    <div class="form-group">
+                    <DshSessionPresetSelect v-if="selectedAgentType === 'dsh'" class="form-group"
+                        v-model="selectedRuntimePreset" :disabled="isSavingAgent"
+                        @valid="selectedRuntimePresetReady = $event" />
+                    <div v-if="supportsGlobalAgentMode" class="form-group">
+                        <label class="form-label">{{ t('codingAgents.launchModeScope') }}</label>
+                        <NSelect
+                            :value="selectedAgentMode"
+                            :options="agentModeOptions"
+                            @update:value="handleAgentModeChange"
+                        />
+                    </div>
+                    <div v-if="!usesGlobalAgentMode" class="form-group">
                         <label class="form-label">{{ t('models.provider') }}</label>
                         <NSelect
                             :value="selectedAgentProvider"
@@ -2466,24 +2874,25 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                             @update:value="handleAgentProviderChange"
                         />
                     </div>
-                    <div class="form-group">
+                    <div v-if="!usesGlobalAgentMode" class="form-group">
                         <label class="form-label">{{ t('models.models') }}</label>
                         <NSelect
-                            v-model:value="selectedAgentModel"
+                            :value="selectedAgentModel"
                             :options="agentModelOptions"
                             :placeholder="t('models.selectModel')"
                             :disabled="!selectedAgentProvider"
                             filterable
+                            @update:value="handleAgentModelChange"
                         />
                     </div>
-                    <div v-if="selectedAgentType !== 'hermes'" class="form-group">
+                    <div v-if="selectedAgentType !== 'hermes' && !usesGlobalAgentMode" class="form-group">
                         <label class="form-label">{{ t('codingAgents.protocolScope') }}</label>
                         <NSelect
                             v-model:value="selectedAgentApiMode"
                             :options="agentApiModeOptions"
                         />
                     </div>
-                    <div class="form-group">
+                    <div v-if="!usesGlobalAgentMode" class="form-group">
                         <label class="form-label">{{ t('chat.reasoningEffort.tooltip') }}</label>
                         <NSelect
                             v-model:value="selectedAgentReasoningEffort"
@@ -2507,7 +2916,8 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                             :placeholder="t('groupChat.agentDescPlaceholder')"
                         />
                     </div>
-                    <div class="modal-actions" :class="{ 'agent-modal-actions': editingAgent }">
+                <template #footer>
+                    <div class="agent-drawer-actions" :class="{ 'is-editing': editingAgent }">
                         <NButton
                             v-if="editingAgent"
                             type="error"
@@ -2518,7 +2928,7 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                             {{ t('common.delete') }}
                         </NButton>
                         <NSpace justify="end">
-                            <NButton :disabled="isSavingAgent" @click="closeAgentModal">{{ t('common.cancel') }}</NButton>
+                            <NButton :disabled="isSavingAgent" @click="closeAgentDrawer">{{ t('common.cancel') }}</NButton>
                             <NButton
                                 type="primary"
                                 :disabled="!canConfirmAddAgent"
@@ -2528,6 +2938,110 @@ function handleClarifyKeydown(event: KeyboardEvent) {
                                 {{ editingAgent ? t('common.update') : t('common.add') }}
                             </NButton>
                         </NSpace>
+                    </div>
+                </template>
+            </NDrawerContent>
+        </NDrawer>
+
+        <Teleport to="body">
+            <div
+                v-if="showAgentPresetDialog"
+                class="modal-backdrop agent-preset-dialog-backdrop"
+                @click.self="closeAgentPresetDialog"
+            >
+                <div class="modal agent-preset-dialog">
+                    <h3>
+                        {{ agentPresetDialogMode === 'select'
+                            ? t('groupChat.chooseAgentPreset')
+                            : t('groupChat.manageAgentPresets') }}
+                    </h3>
+                    <NInput
+                        v-model:value="agentPresetSearch"
+                        clearable
+                        :placeholder="t('groupChat.searchAgentPresets')"
+                    />
+                    <div v-if="isLoadingAgentPresets" class="agent-preset-dialog-state">
+                        {{ t('groupChat.agentPresetsLoading') }}
+                    </div>
+                    <div v-else-if="agentPresetLoadError" class="agent-preset-dialog-state is-error">
+                        <span>{{ agentPresetLoadError }}</span>
+                        <NButton size="small" secondary @click="loadAgentPresets">
+                            {{ t('common.retry') }}
+                        </NButton>
+                    </div>
+                    <div v-else-if="agentPresets.length === 0" class="agent-preset-dialog-state">
+                        {{ t('groupChat.agentPresetsEmpty') }}
+                    </div>
+                    <div v-else-if="filteredAgentPresets.length === 0" class="agent-preset-dialog-state">
+                        {{ t('groupChat.agentPresetsNoResults') }}
+                    </div>
+                    <div v-else class="agent-preset-dialog-list">
+                        <button
+                            v-for="preset in filteredAgentPresets"
+                            :key="preset.id"
+                            type="button"
+                            class="agent-preset-dialog-row"
+                            :class="{
+                                selected: pendingAgentPresetId === preset.id,
+                                unavailable: !preset.available,
+                            }"
+                            :disabled="!preset.available"
+                            :aria-pressed="pendingAgentPresetId === preset.id"
+                            @click="selectAgentPresetForDialog(preset)"
+                        >
+                            <span class="agent-preset-dialog-row-name">{{ preset.name }}</span>
+                            <span class="agent-preset-dialog-row-config">
+                                {{ preset.profile }} · {{ preset.agentMode === 'global'
+                                    ? t('codingAgents.launchModeGlobal')
+                                    : `${preset.provider}/${preset.model}` }}
+                            </span>
+                            <span v-if="!preset.available" class="agent-preset-dialog-row-error">
+                                {{ preset.validationError || t('groupChat.agentPresetUnavailable') }}
+                            </span>
+                        </button>
+                    </div>
+                    <p class="form-hint">{{ t('groupChat.agentPresetSnapshotHint') }}</p>
+                    <div v-if="agentPresetDialogMode === 'manage'" class="agent-preset-management-actions">
+                        <NButton
+                            secondary
+                            :disabled="!canConfirmAddAgent || isSavingAgentPreset"
+                            :loading="isSavingAgentPreset && !pendingAgentPresetId"
+                            @click="createAgentPresetFromCurrent"
+                        >
+                            {{ t('groupChat.saveCurrentAgentAsPreset') }}
+                        </NButton>
+                        <NButton
+                            secondary
+                            :disabled="!pendingAgentPresetId || !canConfirmAddAgent || isSavingAgentPreset"
+                            :loading="isSavingAgentPreset && Boolean(pendingAgentPresetId)"
+                            @click="updateSelectedAgentPreset"
+                        >
+                            {{ t('groupChat.updateAgentPreset') }}
+                        </NButton>
+                        <NPopconfirm
+                            v-if="pendingAgentPresetId"
+                            @positive-click="deleteAgentPreset"
+                        >
+                            <template #trigger>
+                                <NButton type="error" secondary :disabled="isSavingAgentPreset">
+                                    {{ t('groupChat.deleteAgentPreset') }}
+                                </NButton>
+                            </template>
+                            {{ t('groupChat.deleteAgentPresetConfirm') }}
+                        </NPopconfirm>
+                    </div>
+                    <div class="modal-actions">
+                        <NButton @click="closeAgentPresetDialog">
+                            {{ t('common.cancel') }}
+                        </NButton>
+                        <NButton
+                            v-if="agentPresetDialogMode === 'select'"
+                            type="primary"
+                            :disabled="!pendingAgentPreset?.available"
+                            @click="confirmAgentPresetSelection"
+                        >
+                            {{ t('groupChat.applyAgentPreset') }}
+                        </NButton>
                     </div>
                 </div>
             </div>
@@ -4317,6 +4831,104 @@ export default defineComponent({ components: { CreateRoomForm } })
     }
 }
 
+.agent-preset-entry {
+    margin-bottom: 18px;
+}
+
+.agent-preset-dialog-backdrop {
+    z-index: 1010;
+}
+
+.agent-preset-dialog {
+    width: 480px;
+}
+
+.agent-preset-dialog-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    margin-top: 12px;
+    overflow-y: auto;
+}
+
+.agent-preset-dialog-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+    width: 100%;
+    padding: 11px 12px;
+    border: 1px solid $border-color;
+    border-radius: $radius-md;
+    color: $text-primary;
+    background: $bg-main-surface;
+    text-align: start;
+    cursor: pointer;
+    transition:
+        border-color $transition-fast,
+        background-color $transition-fast;
+
+    &:hover:not(:disabled) {
+        border-color: rgba(var(--accent-primary-rgb), 0.55);
+        background: rgba(var(--accent-primary-rgb), 0.05);
+    }
+
+    &.selected {
+        border-color: var(--accent-primary);
+        background: rgba(var(--accent-primary-rgb), 0.09);
+    }
+
+    &.unavailable {
+        cursor: not-allowed;
+        opacity: 0.72;
+    }
+}
+
+.agent-preset-dialog-row-name {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.agent-preset-dialog-row-config,
+.agent-preset-dialog-row-error {
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.agent-preset-dialog-row-config {
+    color: $text-secondary;
+}
+
+.agent-preset-dialog-row-error {
+    color: $error;
+}
+
+.agent-preset-dialog-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    padding: 28px 16px;
+    border: 1px dashed $border-color;
+    border-radius: $radius-md;
+    color: $text-muted;
+    text-align: center;
+
+    &.is-error {
+        color: $error;
+    }
+}
+
+.agent-preset-management-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 14px;
+}
+
 .room-settings-drawer {
     min-width: 0;
 }
@@ -4597,8 +5209,15 @@ export default defineComponent({ components: { CreateRoomForm } })
     gap: 8px;
 }
 
-.agent-modal-actions {
-    justify-content: space-between;
+.agent-drawer-actions {
+    display: flex;
+    width: 100%;
+    justify-content: flex-end;
+    gap: 8px;
+
+    &.is-editing {
+        justify-content: space-between;
+    }
 }
 
 .form-hint {

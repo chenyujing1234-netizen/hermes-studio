@@ -48,15 +48,16 @@ const trackerMock = vi.hoisted(() => ({
 }))
 
 vi.mock('socket.io-client', () => ({ io: vi.fn(() => mockSocket) }))
-vi.mock('../../packages/server/src/services/auth', () => ({ getToken: vi.fn(async () => 'test-token') }))
-vi.mock('../../packages/server/src/services/config-helpers', () => ({
-  readConfigYamlForProfile: vi.fn(async () => ({ model: { default: 'model-a', provider: 'provider-a' } })),
+vi.mock('../../packages/server/src/modules/studio/services/auth/token-auth', () => ({ getToken: vi.fn(async () => 'test-token') }))
+vi.mock('../../packages/server/src/modules/studio/public/profile-config', () => ({
+  readConfigYamlForProfile: vi.fn(async () => ({ model: { default: 'model-a', provider: 'provider-a' }, mcp_servers: { 'ekko-studio-interaction': { command: 'studio' } } })),
 }))
-vi.mock('../../packages/server/src/db/hermes/usage-store', () => ({ updateUsage: vi.fn() }))
-vi.mock('../../packages/server/src/services/hermes/agent-bridge', () => ({
-  AgentBridgeClient: vi.fn(() => bridgeMock),
+vi.mock('../../packages/server/src/modules/studio/repositories/usage-store', () => ({ updateUsage: vi.fn() }))
+vi.mock('../../packages/server/src/modules/studio/public/group-chat-agent-runtime', () => ({
+  createGroupPrimaryAgentBridge: vi.fn(() => bridgeMock),
+  cancelGroupEkkoClarification: vi.fn(() => ({ resolved: false })),
 }))
-vi.mock('../../packages/server/src/services/hermes/run-chat/workspace-diff-tracker', () => trackerMock)
+vi.mock('../../packages/server/src/modules/studio/services/chat-run/workspace-diff-tracker', () => trackerMock)
 
 describe('group chat agent workspace bridge runs', () => {
   beforeEach(() => {
@@ -114,12 +115,12 @@ describe('group chat agent workspace bridge runs', () => {
   }
 
   async function workerSessionId(seed = 'seed-1') {
-    const { groupBridgeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupBridgeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     return groupBridgeSessionId('room-1', 'default', 'Worker', seed)
   }
 
   it('keeps the session key freshness suffix when long names force bridge session id truncation', async () => {
-    const { groupBridgeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupBridgeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const longAgentName = 'Worker'.repeat(40)
 
     const first = groupBridgeSessionId('room-1', 'default', longAgentName, 'seed-1')
@@ -187,9 +188,10 @@ describe('group chat agent workspace bridge runs', () => {
   it.each([
     ['codex', 'codex'],
     ['claude', 'claude-code'],
+    ['dsh', 'dsh'],
     ['ekko', 'ekko-agent'],
   ] as const)('keeps %s tool output mention text non-routable', async (agent, codingAgentId) => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async (_data: any, options: any) => {
       options.onEvent?.('tool.started', {
         tool_call_id: `tool-${agent}`,
@@ -208,6 +210,7 @@ describe('group chat agent workspace bridge runs', () => {
     const client = await clients.createAgent({
       agentId: `agent-${agent}`,
       agent,
+      agentPreset: agent === 'dsh' ? 'minimal' : undefined,
       profile: 'default',
       name: agent,
       description: '',
@@ -230,7 +233,7 @@ describe('group chat agent workspace bridge runs', () => {
     })
 
     expect(runAndWait).toHaveBeenCalledWith(
-      expect.objectContaining({ coding_agent_id: codingAgentId }),
+      expect.objectContaining({ coding_agent_id: codingAgentId, ...(agent === 'dsh' ? { agent_preset: 'minimal' } : {}) }),
       expect.anything(),
     )
     expect(mockSocket.emit).toHaveBeenCalledWith(
@@ -310,7 +313,7 @@ describe('group chat agent workspace bridge runs', () => {
       }
       return mockSocket
     })
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async (_data: any, options: any) => {
       options.onEvent?.('tool.started', {
         tool_call_id: 'tool-codex-terminal-loss',
@@ -391,7 +394,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('generates one complete entry mention DTO for repeated mentions of the same participant anywhere in a reply', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const author = await clients.createAgent({
       agentId: 'agent-author',
@@ -420,7 +423,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('does not generate a structured mention for the replying agent itself', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const author = await clients.createAgent({
       agentId: 'agent-author',
@@ -452,7 +455,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('routes each distinct participant once regardless of mention position or repetition', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const author = await clients.createAgent({
       agentId: 'agent-author',
@@ -485,8 +488,13 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('dispatches a Codex group agent through chat-run without invoking the Hermes bridge', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async (_data: any, options: any) => {
+      for (const revision of [1, 2]) options.onEvent?.('plan.updated', {
+        session_id: _data.session_id, run_id: 'runtime-run', plan_id: 'group-plan', revision,
+        execution_state: revision === 1 ? 'running' : 'ended', created_at: 1000, updated_at: 1000 + revision,
+        plan: [{ id: 'check', step: 'Check group plan', status: revision === 1 ? 'in_progress' : 'completed' }],
+      })
       options.onEvent?.('reasoning.delta', { delta: 'thinking' })
       options.onEvent?.('tool.started', {
         tool_call_id: 'tool-1',
@@ -539,7 +547,7 @@ describe('group chat agent workspace bridge runs', () => {
         workspace: '',
         maxHistoryTokens: 32000,
         remoteWorkspaceApi: {
-          endpoint: 'https://group.example/api/hermes/group-chat/remote-workspace/v1',
+          endpoint: 'https://group.example/api/studio/group-chat/remote-workspace/v1',
           token: 'a'.repeat(43),
           access: 'read-write',
         },
@@ -586,6 +594,10 @@ describe('group chat agent workspace bridge runs', () => {
       }],
     })
 
+    const cards = mockSocket.emit.mock.calls.filter(call => call[0] === 'message' && call[1]?.tool_name === 'task_plan').map(call => call[1])
+    expect(cards).toHaveLength(2)
+    expect(cards[0].id).toBe(cards[1].id)
+    expect(JSON.parse(cards[1].content)).toMatchObject({ revision: 2, execution_state: 'ended', run_id: cards[1].run_id })
     expect(runAndWait).toHaveBeenCalledWith(expect.objectContaining({
       coding_agent_id: 'codex',
       source: 'group_chat',
@@ -612,12 +624,12 @@ describe('group chat agent workspace bridge runs', () => {
     expect(runAndWait.mock.calls[0][0].instructions).toContain('- [AI Agent] Reviewer: Reviews changes')
     expect(runAndWait.mock.calls[0][0].instructions).not.toContain('Sleeping')
     expect(runAndWait.mock.calls[0][0].instructions).toContain(
-      'https://group.example/api/hermes/group-chat/remote-workspace/v1',
+      'https://group.example/api/studio/group-chat/remote-workspace/v1',
     )
     expect(runAndWait.mock.calls[0][0].instructions).toContain(`Bearer ${'a'.repeat(43)}`)
     expect(runAndWait.mock.calls[0][0].instructions).toContain('"action":"read"')
     expect(runAndWait.mock.calls[0][0].instructions).toContain(
-      'https://group.example/api/hermes/group-chat/remote-workspace/v1/file',
+      'https://group.example/api/studio/group-chat/remote-workspace/v1/file',
     )
     expect(runAndWait.mock.calls[0][0].instructions).toContain('X-Expected-SHA256')
     expect(runAndWait.mock.calls[0][0].group_system_prompt).toBe(runAndWait.mock.calls[0][0].instructions)
@@ -678,12 +690,63 @@ describe('group chat agent workspace bridge runs', () => {
     expect(runAndWait.mock.calls[0][0].session_id).toMatch(/^gc_run_/)
   })
 
+  it('normalizes non-Hermes approval events onto the authoritative group run generation', async () => {
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
+    const runAndWait = vi.fn(async (_data: any, options: any) => {
+      options.onEvent?.('approval.requested', {
+        run_id: 'runtime-run-id',
+        approval_id: 'approval-1',
+        command: 'printf harmless',
+      })
+      return { ok: true, run_id: 'runtime-run-id', output: 'done' }
+    })
+    const clients = new AgentClients()
+    clients.setChatRunService({ runAndWait, abortSession: vi.fn(async () => {}) })
+    const client = await clients.createAgent({
+      agentId: 'agent-codex',
+      agent: 'codex',
+      profile: 'default',
+      name: 'Coder',
+      description: '',
+      invited: 0,
+      backgroundDelegationEnabled: false,
+    } as any) as any
+    client.setStorage({
+      getRoom: vi.fn(() => ({ sessionSeed: 'seed-1', workspace: '', maxHistoryTokens: 32000 })),
+      getRoomAgents: vi.fn(() => []),
+      getMentionableRoomAgents: vi.fn(() => []),
+      getMessagesForContext: vi.fn(() => []),
+      getContextSnapshot: vi.fn(() => null),
+    })
+
+    await client.replyToMention('room-1', {
+      messageId: 'message-1',
+      content: '@Coder run safely',
+      senderName: 'Human',
+      senderId: 'human-1',
+      timestamp: 1,
+      role: 'user',
+    })
+
+    const streamStart = mockSocket.emit.mock.calls
+      .find(([event]) => event === 'message_stream_start')?.[1]
+    const approval = mockSocket.emit.mock.calls
+      .find(([event]) => event === 'approval.requested')?.[1]
+    expect(streamStart?.run_id).toBeTruthy()
+    expect(approval).toMatchObject({
+      approval_id: 'approval-1',
+      runId: streamStart.run_id,
+    })
+    expect(approval).not.toHaveProperty('run_id')
+  })
+
   it.each([
     ['ekko', 'ekko-agent'],
     ['claude', 'claude-code'],
+    ['dsh', 'dsh'],
     ['pi', 'pi'],
   ] as const)('passes the dynamic group system prompt to the %s runtime', async (agent, codingAgentId) => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async (_data: any, options: any) => {
       options.onEvent?.('clarify.requested', {
         clarify_id: `clarify-${agent}`, question: 'Continue?', choices: ['yes', 'no'], timeout_ms: 300000,
@@ -741,6 +804,34 @@ describe('group chat agent workspace bridge runs', () => {
     expect(runData.group_system_prompt).toBe(runData.instructions)
     expect(runData.group_room_id).toBe('room-runtime')
     expect(runData.group_agent_id).toBe(`agent-${agent}`)
+    if (agent === 'ekko') {
+      expect(runData.memory_messages).toEqual([
+        expect.objectContaining({
+          role: 'user',
+          content: 'Human：reply',
+          metadata: expect.objectContaining({ senderName: 'Human' }),
+        }),
+      ])
+      expect(runData.memory_write_policy).toBe('automatic')
+      expect(runData.memory_origin).toEqual({
+        host: 'hermes-studio',
+        namespace: 'group-chat',
+        contextId: 'room-runtime',
+      })
+      expect(runData.memory_recall_scopes).toEqual([
+        { type: 'profile' },
+        { type: 'context', namespace: 'studio.group-chat', id: 'room-runtime' },
+        { type: 'session', id: expect.any(String) },
+      ])
+      expect(runData.memory_default_write_scope).toEqual({
+        type: 'context',
+        namespace: 'studio.group-chat',
+        id: 'room-runtime',
+      })
+    } else {
+      expect(runData).not.toHaveProperty('memory_messages')
+      expect(runData).not.toHaveProperty('memory_write_policy')
+    }
     expect(mockSocket.emit).toHaveBeenCalledWith('clarify.requested', expect.objectContaining({
       roomId: 'room-runtime', clarify_id: `clarify-${agent}`, question: 'Continue?',
     }))
@@ -749,8 +840,57 @@ describe('group chat agent workspace bridge runs', () => {
     }))
   })
 
+  it('runs a global Codex group Agent without scoped provider, model, protocol, or reasoning overrides', async () => {
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
+    const runAndWait = vi.fn(async () => ({ ok: true, output: 'done' }))
+    const clients = new AgentClients()
+    clients.setChatRunService({ runAndWait, abortSession: vi.fn(async () => {}) })
+    const client = await clients.createAgent({
+      agentId: 'agent-global-codex',
+      agent: 'codex',
+      agentMode: 'global',
+      profile: 'default',
+      provider: 'must-not-leak',
+      model: 'must-not-leak',
+      apiMode: 'chat_completions',
+      reasoningEffort: 'high',
+      name: 'Global Codex',
+      description: 'Uses the user CLI configuration',
+      invited: 0,
+    } as any) as any
+    client.setStorage({
+      getRoom: vi.fn(() => ({ name: 'Global Room', workspace: '' })),
+      getRoomMembers: vi.fn(() => []),
+      getRoomAgents: vi.fn(() => []),
+    })
+
+    await client.replyToMention('room-global', {
+      messageId: 'msg-global',
+      content: '@Global Codex work',
+      senderName: 'Human',
+      senderId: 'human-1',
+      timestamp: 1,
+      role: 'user',
+    })
+
+    const runInput = runAndWait.mock.calls[0][0]
+    expect(runInput).toMatchObject({
+      coding_agent_id: 'codex',
+      mode: 'global',
+      profile: 'default',
+      group_room_id: 'room-global',
+      group_agent_id: 'agent-global-codex',
+    })
+    expect(runInput.instructions).toContain('You are "Global Codex", an AI assistant in the group chat room "Global Room"')
+    expect(runInput.group_system_prompt).toBe(runInput.instructions)
+    expect(runInput).not.toHaveProperty('provider')
+    expect(runInput).not.toHaveProperty('model')
+    expect(runInput).not.toHaveProperty('apiMode')
+    expect(runInput).not.toHaveProperty('reasoning_effort')
+  })
+
   it('keeps Pi group turns temporary while reinjecting the room history', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async () => ({ ok: true, output: 'done' }))
     const disposeSession = vi.fn(async () => {})
     const clients = new AgentClients()
@@ -812,7 +952,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('adds the workspace-scoped security policy only when a non-owner mentions the Agent', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async (_data: any) => ({ ok: true, output: 'done' }))
     const clients = new AgentClients()
     clients.setChatRunService({ runAndWait, abortSession: vi.fn(async () => {}) })
@@ -901,7 +1041,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('finishes a group-only Codex tool card when chat-run has no matching completed event', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const runAndWait = vi.fn(async (_data: any, options: any) => {
       options.onEvent?.('tool.started', {
         tool_call_id: 'call-write-stdin',
@@ -958,7 +1098,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('interrupts a non-Hermes group agent through chat-run only', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const chatRunService = {
       runAndWait: vi.fn(),
       abortSession: vi.fn(async () => {}),
@@ -990,7 +1130,7 @@ describe('group chat agent workspace bridge runs', () => {
 
   it('does not block room-wide interrupts for idle agents with no bridge session', async () => {
     bridgeMock.interrupt.mockRejectedValueOnce(new Error('unknown session'))
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients()
     const client = await clients.createAgent({
       agentId: 'agent-1',
@@ -1070,7 +1210,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('marks a mentioned agent active before rolling-summary preparation finishes', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const statuses: Array<{ agentName: string; status: string }> = []
     let finishSummary!: (value: { summary: string; history: [] }) => void
@@ -1109,7 +1249,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('starts every explicitly mentioned Agent in parallel', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const started: string[] = []
     let finishRuns!: () => void
@@ -1152,7 +1292,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('dispatches an agent handoff after a CJK speaker prefix', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const replyToMention = vi.fn(async () => {})
     const codex = {
@@ -1231,7 +1371,7 @@ describe('group chat agent workspace bridge runs', () => {
   })
 
   it('keeps an agent active until all queued mentions finish', async () => {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients() as any
     const statuses: string[] = []
     let finishFirst!: () => void
@@ -1280,7 +1420,7 @@ describe('group chat agent workspace bridge runs', () => {
     workspace = '',
     runtimeConfig: { provider?: string; model?: string; reasoningEffort?: string } = {},
   ) {
-    const { AgentClients } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { AgentClients } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const clients = new AgentClients()
     const client = await clients.createAgent({
       agentId: 'agent-1',
@@ -1335,6 +1475,52 @@ describe('group chat agent workspace bridge runs', () => {
     expect(mockSocket.emit).toHaveBeenCalledWith('clarify.resolved', expect.objectContaining({
       roomId: 'room-1', agentName: 'Worker', clarify_id: 'clarify-hermes', resolved: true,
     }))
+  })
+
+  it.each(['ended', 'interrupted', 'failed'] as const)('gives Hermes a plan-only context and persists its %s state', async terminal => {
+    const { TaskPlanRuns } = await import('../../packages/server/src/modules/studio/services/task-plan-runs')
+    const fallbackPublish = vi.fn()
+    const plans = new TaskPlanRuns(vi.fn(), fallbackPublish)
+    const client = await createClient('')
+    let contextId = ''
+    client.setChatRunService({
+      runAndWait: vi.fn(), abortSession: vi.fn(),
+      beginGroupTaskPlanRun(sessionId: string, profile: string, runId: string, isCurrent: () => boolean, publish: any) {
+        contextId = plans.begin(sessionId, profile, () => ({ isWorking: isCurrent(), activeRunMarker: runId }), publish)
+        return { contextId, finish: (state: any) => plans.finish(contextId, state) }
+      },
+    })
+    bridgeMock.chat.mockImplementation(async (sessionId: string) => {
+      plans.update(contextId, 'default', { plan: [{ id: 'a', step: 'Inspect', status: 'in_progress' }] })
+      if (terminal === 'failed') throw new Error('test bridge failure')
+      if (terminal === 'interrupted') await client.interrupt('room-1')
+      return { ok: true, run_id: 'bridge-run-id', session_id: sessionId, status: 'running' }
+    })
+    await client.replyToMention('room-1', { content: '@Worker inspect', senderName: 'Alice', senderId: 'user-1', timestamp: 1 })
+    const input = String((bridgeMock.chat.mock.calls[0] as any)[1])
+    expect(input).toContain(contextId)
+    expect(input).toContain('ekko_studio_update_plan')
+    expect(input).not.toContain('ekko_studio_clarify')
+    const cards = mockSocket.emit.mock.calls.filter(call => call[0] === 'message' && call[1]?.tool_name === 'task_plan').map(call => call[1])
+    expect(cards).toHaveLength(2)
+    expect(cards[0].id).toBe(cards[1].id)
+    expect(JSON.parse(cards[1].content)).toMatchObject({ revision: 2, execution_state: terminal, plan: [{ status: 'pending' }] })
+    expect(fallbackPublish).not.toHaveBeenCalled()
+    expect(() => plans.update(contextId, 'default', { plan: [] })).toThrow('expired')
+  })
+
+  it('does not attach MCP plans or usage guidance to a group bridge run with MCPs disabled', async () => {
+    const { readConfigYamlForProfile } = await import('../../packages/server/src/modules/studio/public/profile-config')
+    vi.mocked(readConfigYamlForProfile).mockResolvedValueOnce({ mcp_servers: {} })
+    const client = await createClient('')
+    const beginGroupTaskPlanRun = vi.fn()
+    client.setChatRunService({ runAndWait: vi.fn(), abortSession: vi.fn(), beginGroupTaskPlanRun })
+    await client.replyToMention('room-1', { content: '@Worker inspect', senderName: 'Alice', senderId: 'user-1', timestamp: 1 })
+    expect(beginGroupTaskPlanRun).not.toHaveBeenCalled()
+    const call = bridgeMock.chat.mock.calls[0] as any
+    expect(String(call[1])).not.toContain('studio_task_plan_context')
+    expect(call[3]).not.toContain('ekko_studio_')
+    expect(call[3]).toContain('# Output format guidelines')
   })
 
   it('omits workspace when the room has no workspace', async () => {
@@ -1483,7 +1669,7 @@ describe('group chat agent workspace bridge runs', () => {
 
   it('finalizes an aborted workspace diff on interrupt and ignores a later stream finalizer', async () => {
     const client = await createClient('/tmp/workspace')
-    const { groupRuntimeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupRuntimeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const sessionId = groupRuntimeSessionId('room-1', 'default', 'Worker')
     client.activeSessions.set('room-1', sessionId)
     const runId = '0123456789abcdef0123456789abcdef'
@@ -1513,7 +1699,7 @@ describe('group chat agent workspace bridge runs', () => {
   it('does not fail a synced interrupt when best-effort UI status emits cannot use the socket', async () => {
     const client = await createClient('/tmp/workspace')
     mockSocket.connected = false
-    const { groupRuntimeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupRuntimeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const sessionId = groupRuntimeSessionId('room-1', 'default', 'Worker')
     client.activeSessions.set('room-1', sessionId)
     const runId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -1535,7 +1721,7 @@ describe('group chat agent workspace bridge runs', () => {
   it('does not mark workspace diff runs aborted when bridge interrupt fails', async () => {
     bridgeMock.interrupt.mockRejectedValueOnce(new Error('stale session'))
     const client = await createClient('/tmp/workspace')
-    const { groupRuntimeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupRuntimeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const sessionId = groupRuntimeSessionId('room-1', 'default', 'Worker')
     client.activeSessions.set('room-1', sessionId)
     const runId = 'dddddddddddddddddddddddddddddddd'
@@ -1553,7 +1739,7 @@ describe('group chat agent workspace bridge runs', () => {
   it('keeps workspace diff finalization pending when bridge interrupt is not synced yet', async () => {
     bridgeMock.interrupt.mockResolvedValueOnce({ ok: true, synced: false })
     const client = await createClient('/tmp/workspace')
-    const { groupRuntimeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupRuntimeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const sessionId = groupRuntimeSessionId('room-1', 'default', 'Worker')
     client.activeSessions.set('room-1', sessionId)
     const runId = 'cccccccccccccccccccccccccccccccc'
@@ -1644,7 +1830,7 @@ describe('group chat agent workspace bridge runs', () => {
     saveWorkspaceDiffMessageForRun.mockReturnValue({ message: { id: 'diff-1', roomId: 'room-1' }, totalTokens: 0 })
     const runA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     const runB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-    const { groupRuntimeSessionId } = await import('../../packages/server/src/services/hermes/group-chat/agent-clients')
+    const { groupRuntimeSessionId } = await import('../../packages/server/src/modules/studio/services/group-chat/agent-clients')
     const sessionId = groupRuntimeSessionId('room-1', 'default', 'Worker')
     client.activeSessions.set('room-1', sessionId)
     const stateA = client.beginWorkspaceDiffIfNeeded({ roomId: 'room-1', sessionId, runId: runA, workspace: '/tmp/workspace' })

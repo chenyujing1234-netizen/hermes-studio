@@ -121,6 +121,18 @@ describe('desktop runtime paths', () => {
     }
   })
 
+  it.each(['linux', 'darwin', 'win32'] as const)('resolves the %s app icon in development and packaged builds', async (platform) => {
+    setPlatform(platform)
+    const { desktopIcon } = await import('../../packages/desktop/src/main/paths')
+    const appPath = tempDir()
+    mockElectronApp.getAppPath = () => appPath
+    const filename = platform === 'linux' ? 'iconLinux.png' : 'icon.png'
+
+    expect(desktopIcon()).toBe(join(appPath, 'build', filename))
+    mockElectronApp.isPackaged = true
+    expect(desktopIcon()).toBe(join(process.resourcesPath, 'build', filename))
+  })
+
   it('uses the downloaded runtime in packaged builds even when stale install resources exist', async () => {
     mkdirSync(join(process.resourcesPath, 'python'), { recursive: true })
     mkdirSync(join(process.resourcesPath, 'node'), { recursive: true })
@@ -185,7 +197,7 @@ describe('desktop runtime paths', () => {
 
     expect(desktopRuntimeDir()).toBe(runtimeDir)
     expect(webuiDir()).toBe(webUiDir)
-    expect(targetDesktopRuntimeDir()).toBe(join(storageRoot, 'hermes', '0.20.0', runtimePlatformKey()))
+    expect(targetDesktopRuntimeDir()).toBe(join(storageRoot, 'hermes', '0.20.6', runtimePlatformKey()))
   })
 
   it('falls back to the bundled Web UI when the active Web UI directory is incomplete', async () => {
@@ -333,7 +345,7 @@ describe('desktop runtime paths', () => {
 
     const { runtimePlatformKey } = await import('../../packages/desktop/src/main/runtime-paths')
     const runtimeDir = join(homeDir, 'desktop-runtime', 'hermes', '0.15.2', runtimePlatformKey())
-    const targetRuntimeDir = join(homeDir, 'desktop-runtime', 'hermes', '0.20.0', runtimePlatformKey())
+    const targetRuntimeDir = join(homeDir, 'desktop-runtime', 'hermes', '0.20.6', runtimePlatformKey())
     createRuntimeWithoutManifest(runtimeDir)
 
     const { desktopRuntimeDir, targetDesktopRuntimeDir } = await import('../../packages/desktop/src/main/paths')

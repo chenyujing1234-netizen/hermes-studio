@@ -1,4 +1,5 @@
 import router from '@/router'
+import { invalidateAuth } from './auth-invalidation'
 
 const DEFAULT_BASE_URL = ''
 const ACTIVE_PROFILE_STORAGE_KEY = 'hermes_active_profile_name'
@@ -29,15 +30,20 @@ export function getApiKey(): string {
 }
 
 export function setServerUrl(url: string) {
+  const previousBase = getBaseUrl()
   localStorage.setItem('hermes_server_url', url)
+  if (getBaseUrl() !== previousBase) invalidateAuth()
 }
 
 export function setApiKey(key: string) {
+  const changed = getApiKey() !== key
   localStorage.setItem('hermes_api_key', key)
+  if (changed) invalidateAuth()
 }
 
 export function clearApiKey() {
   localStorage.removeItem('hermes_api_key')
+  invalidateAuth()
 }
 
 function clearAuthSessionState() {
@@ -102,6 +108,22 @@ export function getActiveProfileName(): string | null {
   return localStorage.getItem(ACTIVE_PROFILE_STORAGE_KEY)
 }
 
+// The Models page keeps its filter in the URL; it never changes the active Profile.
+export function getModelsPageProfile(): string | null {
+  const route = router.currentRoute.value
+  return route.name === 'hermes.models' && typeof route.query?.modelProfile === 'string'
+    ? route.query.modelProfile.trim() || null
+    : null
+}
+
+function modelSettingsRequestProfile(path: string): string | null {
+  const pathname = path.split('?')[0]
+  const isModelSettings = /^\/api\/hermes\/(?:config(?:\/|$)|auth\/|provider-models(?:\/|$)|model-alias$|model-visibility$|custom-model$)/.test(pathname)
+    || /^\/api\/studio\/(?:stt|tts)\/(?:settings|local-model)(?:\/|$)/.test(pathname)
+    || pathname === '/api/voice/providers/probe'
+  return isModelSettings ? getModelsPageProfile() : null
+}
+
 function bodyHasProfileSelector(body: BodyInit | null | undefined): boolean {
   if (typeof body !== 'string') return false
   try {
@@ -128,11 +150,11 @@ function shouldAttachProfileHeader(path: string, options: RequestInit): boolean 
 }
 
 function isProfileWideSessionCollection(pathname: string): boolean {
-  return pathname === '/api/hermes/sessions' ||
-    pathname === '/api/hermes/sessions/batch-delete' ||
-    pathname === '/api/hermes/search/sessions' ||
-    pathname === '/api/hermes/sessions/search' ||
-    pathname === '/api/hermes/sessions/conversations'
+  return pathname === '/api/studio/sessions' ||
+    pathname === '/api/studio/sessions/batch-delete' ||
+    pathname === '/api/studio/search/sessions' ||
+    pathname === '/api/studio/sessions/search' ||
+    pathname === '/api/studio/sessions/conversations'
 }
 
 function emitAuthNotice(kind: 'expired' | 'forbidden') {
@@ -173,7 +195,19 @@ function responseErrorMessage(text: string, statusText: string): string {
   }
 }
 
+function responseErrorCode(text: string): string | undefined {
+  const trimmed = text.trim()
+  if (!trimmed) return undefined
+  try {
+    const parsed = JSON.parse(trimmed) as { code?: unknown }
+    return typeof parsed?.code === 'string' && parsed.code ? parsed.code : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const selectedProfile = modelSettingsRequestProfile(path)
   await ensureDesktopAuthReady()
   const base = getBaseUrl()
   const url = `${base}${path}`
@@ -190,8 +224,8 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
 
   // Inject active profile header for request-scoped endpoints. Explicit profile
   // selectors in the URL/body and profile-name routes are validated directly.
-  const profileName = getActiveProfileName()
-  if (profileName && shouldAttachProfileHeader(path, options)) {
+  const profileName = selectedProfile || getActiveProfileName()
+  if (profileName && !new Headers(options.headers).has('X-Hermes-Profile') && shouldAttachProfileHeader(path, options)) {
     headers['X-Hermes-Profile'] = profileName
   }
 
@@ -224,7 +258,10 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
         emitAuthNotice('forbidden')
       }
     }
-    throw new Error(`API Error ${res.status}: ${responseErrorMessage(text, res.statusText)}`)
+    throw Object.assign(
+      new Error(`API Error ${res.status}: ${responseErrorMessage(text, res.statusText)}`),
+      { status: res.status, code: responseErrorCode(text) },
+    )
   }
 
   return res.json()

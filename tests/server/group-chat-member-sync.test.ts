@@ -1,4 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { GroupStreamSnapshots } from '../../packages/server/src/modules/studio/services/group-chat/stream-snapshots'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { socketHandlers, mockSocket, mockIo } = vi.hoisted(() => {
   const socketHandlers = new Map<string, (...args: any[]) => void>()
@@ -22,14 +23,19 @@ vi.mock('socket.io-client', () => ({
   io: mockIo,
 }))
 
-vi.mock('../../packages/server/src/services/auth', () => ({
+vi.mock('../../packages/server/src/modules/studio/services/auth/token-auth', () => ({
   getToken: vi.fn(async () => 'test-token'),
 }))
 
-import { AgentClients, groupBridgeSessionId } from '../../packages/server/src/services/hermes/group-chat/agent-clients'
-import { GroupChatServer } from '../../packages/server/src/services/hermes/group-chat'
-import { canManageGroupChatRoom, isGroupChatRoomOwner } from '../../packages/server/src/services/hermes/group-chat/access'
-import { groupChatRoutes, setGroupChatServer } from '../../packages/server/src/routes/hermes/group-chat'
+import { AgentClients, groupBridgeSessionId } from '../../packages/server/src/modules/studio/services/group-chat/agent-clients'
+import { GroupChatServer } from '../../packages/server/src/modules/studio/sockets/group-chat'
+import type { GroupRoomSummaryService } from '../../packages/server/src/modules/studio/services/group-chat/room-summary'
+import { canManageGroupChatRoom, isGroupChatRoomOwner } from '../../packages/server/src/modules/studio/services/group-chat/access'
+import { groupChatRoutes, setGroupChatServer } from '../../packages/server/src/modules/studio/routes/group-chat'
+import {
+  resetAgentStatusRegistryForTests,
+  updateAgentStatus,
+} from '../../packages/server/src/modules/studio/public/agent-status-registry'
 
 function routeHandler(path: string, method: string) {
   const layer = (groupChatRoutes as any).stack.find((item: any) => item.path === path && item.methods.includes(method))
@@ -37,10 +43,40 @@ function routeHandler(path: string, method: string) {
   return layer.stack[0]
 }
 
+function createRoomSummaryServiceMock(): Pick<GroupRoomSummaryService, 'getState'> {
+  return {
+    getState: vi.fn((roomId: string) => ({
+      roomId,
+      summary: '',
+      summaryThroughMessageId: '',
+      summaryThroughMessageTimestamp: 0,
+      summarizedTurnCount: 0,
+      status: 'idle',
+      version: 0,
+      updatedAt: 0,
+      lastError: null,
+    })),
+  }
+}
+
+function createServerStub(): any {
+  return Object.assign(Object.create(GroupChatServer.prototype), { streamSnapshots: new GroupStreamSnapshots() })
+}
+
 describe('Group Chat member/agent identity sync', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     socketHandlers.clear()
+    resetAgentStatusRegistryForTests()
+    updateAgentStatus('hermes', {
+      installed: true,
+      source: 'user-cli',
+      path: '/usr/local/bin/hermes',
+    })
+  })
+
+  afterEach(() => {
+    resetAgentStatusRegistryForTests()
   })
 
   it('distinguishes profile-based room managers from the room owner for @all', () => {
@@ -75,7 +111,7 @@ describe('Group Chat member/agent identity sync', () => {
         socketId === 'socket-1' ? onlineMember : undefined
       )),
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', roomState]])
     server.typingState = new Map()
     const socket = {
@@ -123,7 +159,7 @@ describe('Group Chat member/agent identity sync', () => {
         socketId === 'socket-1' || socketId === 'socket-2' ? member : undefined
       )),
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', roomState]])
     server.typingState = new Map()
     server.socketUserMap = new Map([
@@ -178,7 +214,7 @@ describe('Group Chat member/agent identity sync', () => {
         socketId === 'socket-1' || socketId === 'socket-2' ? member : undefined
       )),
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', roomState]])
     server.typingState = new Map()
     const typingSocket = {
@@ -214,7 +250,7 @@ describe('Group Chat member/agent identity sync', () => {
     const roomState = {
       getOnlineMemberBySocketId: vi.fn(() => member),
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', roomState]])
     server.typingState = new Map()
     server.socketUserMap = new Map([['socket-1', 'human-1']])
@@ -267,7 +303,7 @@ describe('Group Chat member/agent identity sync', () => {
       getMembersList: vi.fn(() => []),
     }
     const timer = setTimeout(() => {}, 30000)
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', roomState]])
     server.typingState = new Map([['room-1', new Map([['human-1', {
       userName: 'Human',
@@ -340,7 +376,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/agents', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/agents', 'POST')
     const ctx: any = {
       params: { roomId: 'room-1' },
       request: { body: { profile: 'default', name: 'Worker' } },
@@ -376,7 +412,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/agents', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/agents', 'POST')
     const ctx: any = {
       params: { roomId: 'room-1' },
       request: { body: { profile: 'default', name: 'Worker' } },
@@ -413,7 +449,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/agents', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/agents', 'POST')
     const ctx: any = {
       params: { roomId: 'room-1' },
       request: { body: { profile: 'default', name: 'Worker' } },
@@ -453,7 +489,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/agents', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/agents', 'POST')
     const ctx: any = {
       params: { roomId: 'room-1' },
       request: { body: { profile: 'default', name: 'Worker' } },
@@ -475,7 +511,7 @@ describe('Group Chat member/agent identity sync', () => {
       'Worker',
       '',
       0,
-      { agent: 'hermes', provider: '', model: '', apiMode: '', reasoningEffort: '' },
+      { agent: 'hermes', agentMode: 'scoped', provider: '', model: '', apiMode: '', reasoningEffort: '' },
     )
     expect(removeRoomAgent).toHaveBeenCalledWith('room-1', 'row-1')
     expect(chatServer.agentClients.removeAgentFromRoom).toHaveBeenCalledWith('room-1', 'agent-stable-1')
@@ -514,7 +550,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/agents/:agentId', 'DELETE')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/agents/:agentId', 'DELETE')
     const ctx: any = {
       params: { roomId: 'room-1', agentId: 'row-1' },
       status: 200,
@@ -546,7 +582,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId', 'DELETE')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId', 'DELETE')
     const ctx: any = {
       params: { roomId: 'room-1' },
       state: { user: { id: 1, username: 'root', role: 'super_admin' } },
@@ -572,7 +608,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId', 'DELETE')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId', 'DELETE')
     const ctx: any = {
       params: { roomId: 'room-1' },
       state: { user: { id: 1, username: 'root', role: 'super_admin' } },
@@ -590,7 +626,7 @@ describe('Group Chat member/agent identity sync', () => {
     const calls: string[] = []
     const socketsLeave = vi.fn(() => { calls.push('sockets-leave') })
     const saveMessageAndRefreshRoom = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', { hasOnlineMember: vi.fn(() => true) }]])
     server.typingState = new Map([['room-1', new Map([['human-1', { userName: 'Human', timer: setTimeout(() => {}, 1000) }]])]])
     server.contextStatusState = new Map([['room-1', new Map([['Worker', { agentName: 'Worker', status: 'replying' }]])]])
@@ -623,7 +659,7 @@ describe('Group Chat member/agent identity sync', () => {
       message,
       totalTokens: 17,
     }))
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1' })),
       getRoomAgentByAgentId: vi.fn(() => ({
@@ -673,7 +709,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('uses the run identity snapshot when the uploading Agent was removed mid-run', () => {
     const saveMessageAndRefreshRoom = vi.fn((message: any) => ({ message, totalTokens: 9 }))
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1' })),
       getRoomAgentByAgentId: vi.fn(() => null),
@@ -733,7 +769,7 @@ describe('Group Chat member/agent identity sync', () => {
       source: 'agent',
       avatar: '',
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', {
       getOnlineMemberBySocketId: vi.fn(() => agentMember),
     }]])
@@ -795,7 +831,7 @@ describe('Group Chat member/agent identity sync', () => {
     const memberEmit = vi.fn()
     const outsiderEmit = vi.fn()
     const agentEmit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', {
       getOnlineMemberBySocketId: vi.fn((socketId: string) => socketId === 'agent-socket'
         ? {
@@ -876,7 +912,7 @@ describe('Group Chat member/agent identity sync', () => {
   })
 
   it('returns all active runs for rooms the human socket may observe', () => {
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.roomAgentActivityState = new Map([
       ['room-1', new Map([
         ['agent-row-1\u0000run-1', {
@@ -932,7 +968,7 @@ describe('Group Chat member/agent identity sync', () => {
       source: 'agent',
       avatar: '',
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', {
       getOnlineMemberBySocketId: vi.fn(() => agentMember),
     }]])
@@ -1005,7 +1041,7 @@ describe('Group Chat member/agent identity sync', () => {
       source: 'agent',
       avatar: '',
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', {
       hasOnlineMember: vi.fn(() => true),
       getOnlineMemberBySocketId: vi.fn(() => agentMember),
@@ -1045,7 +1081,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/clear-context', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/clear-context', 'POST')
     const ctx: any = {
       params: { roomId: 'room-1' },
       state: { user: { id: 1, username: 'root', role: 'super_admin' } },
@@ -1072,7 +1108,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer(chatServer as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms/:roomId/clear-context', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms/:roomId/clear-context', 'POST')
     const ctx: any = {
       params: { roomId: 'room-1' },
       state: { user: { id: 1, username: 'root', role: 'super_admin' } },
@@ -1088,7 +1124,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('rejects authenticated Socket.IO room joins without invite, membership, owner, or profile scope', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-1', 'auth:42']])
     server.socketRequestedSourceMap = new Map([['socket-1', 'human']])
@@ -1123,7 +1159,7 @@ describe('Group Chat member/agent identity sync', () => {
   })
 
   it('scopes invite guests to one room and denies realtime management', () => {
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.socketRequestedSourceMap = new Map([['guest-socket', 'human']])
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Shared Room', inviteCode: 'secret' })),
@@ -1140,7 +1176,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('loads stable-cursor history only for a socket already joined to the room', () => {
     const member = { source: 'human' }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', {
       getOnlineMemberBySocketId: vi.fn(() => member),
     }]])
@@ -1175,7 +1211,7 @@ describe('Group Chat member/agent identity sync', () => {
     const agents = [{ id: 'row-agent', agentId: 'agent-1', name: 'Agent', executorType: 'server' }]
     const emit = vi.fn()
     const to = vi.fn(() => ({ emit }))
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', ownerAuthUserId: 7 })),
       getRoomAgents: vi.fn(() => agents),
@@ -1196,7 +1232,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('denies read-only room members realtime management actions', async () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', { hasOnlineMember: vi.fn(() => true) }]])
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room', ownerAuthUserId: 7, inviteCode: 'secret' })),
@@ -1221,7 +1257,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('clears reconnectable replying state after an agent interrupt succeeds', async () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', { hasOnlineMember: vi.fn(() => true) }]])
     server.contextStatusState = new Map([['room-1', new Map([[
       'Worker',
@@ -1253,7 +1289,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('allows a member to interrupt only their own remote Agent', async () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', { hasOnlineMember: vi.fn(() => true) }]])
     server.contextStatusState = new Map()
     server.canSocketManageRoom = vi.fn(() => false)
@@ -1296,7 +1332,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('denies runtime agent sockets realtime management actions even after they join the room', async () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-1', { hasOnlineMember: vi.fn(() => true) }]])
     server.socketRequestedSourceMap = new Map([['agent-socket', 'agent']])
     server.storage = {
@@ -1318,7 +1354,7 @@ describe('Group Chat member/agent identity sync', () => {
   })
 
   it('allows pre-persisted agent sockets to join without creating human membership', () => {
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-agent', 'agent-stable-1']])
     server.socketRequestedSourceMap = new Map([['socket-agent', 'agent']])
@@ -1326,6 +1362,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['agent-stable-1', { name: 'Worker', description: 'runtime agent' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room', inviteCode: 'secret', ownerAuthUserId: 7 })),
       getRoomAgentByAgentId: vi.fn(() => ({ id: 'row-1', roomId: 'room-1', agentId: 'agent-stable-1', profile: 'default', name: 'Worker', description: '', invited: 0 })),
@@ -1346,6 +1383,8 @@ describe('Group Chat member/agent identity sync', () => {
 
     server.handleJoin(socket, { roomId: 'room-1' }, ack)
 
+    expect(server.roomSummaryService.getState).toHaveBeenCalledWith('room-1')
+    expect(ack.mock.calls[0][0].roomSummary).toMatchObject({ roomId: 'room-1', status: 'idle' })
     expect(server.storage.getRoomAgentByAgentId).toHaveBeenCalledWith('room-1', 'agent-stable-1')
     expect(server.storage.addRoomMember).not.toHaveBeenCalled()
     expect(socket.join).toHaveBeenCalledWith('room-1')
@@ -1354,7 +1393,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('allows Socket.IO room joins with the matching invite code and then persists membership', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-1', 'auth:42']])
     server.socketRequestedSourceMap = new Map([['socket-1', 'human']])
@@ -1362,6 +1401,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: 'alice', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room', inviteCode: 'secret', ownerAuthUserId: 7 })),
       getRoomAgentByAgentId: vi.fn(() => null),
@@ -1390,7 +1430,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('keeps every joined socket valid when one authenticated user opens the room twice', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([
       ['socket-1', 'auth:42'],
@@ -1407,6 +1447,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: 'alice', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room', inviteCode: null, ownerAuthUserId: 42 })),
       getRoomAgentByAgentId: vi.fn(() => null),
@@ -1446,7 +1487,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('keeps the user online when one of their joined room sockets disconnects', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([
       ['socket-1', 'auth:42'],
@@ -1463,6 +1504,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: 'alice', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.nsp = { to: vi.fn(() => ({ emit })) }
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room', inviteCode: null, ownerAuthUserId: 42 })),
@@ -1510,7 +1552,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('marks the user offline only after their last joined room socket disconnects', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([
       ['socket-1', 'auth:42'],
@@ -1527,6 +1569,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: 'alice', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.nsp = { to: vi.fn(() => ({ emit })) }
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room', inviteCode: null, ownerAuthUserId: 42 })),
@@ -1573,7 +1616,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('reuses an authenticated member name when the browser has no local group-chat name', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-1', 'auth:42']])
     server.socketRequestedSourceMap = new Map([['socket-1', 'human']])
@@ -1581,6 +1624,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: 'alice-login', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoomAgentByAgentId: vi.fn(() => null),
       getMemberByUserId: vi.fn(() => null),
@@ -1639,7 +1683,7 @@ describe('Group Chat member/agent identity sync', () => {
       ensureDefaultRoomWorkspace: (roomId: string, profile: string) => `/managed/group-chat/${profile}/${roomId}`,
     } as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms', 'POST')
+    const handler = routeHandler('/api/studio/group-chat/rooms', 'POST')
     const ctx: any = {
       state: { user: { id: 42, username: 'alice-login', role: 'admin' } },
       request: {
@@ -1692,7 +1736,7 @@ describe('Group Chat member/agent identity sync', () => {
       }),
       getMembersList: vi.fn(() => [liveMember]),
     }
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map([['room-family', room]])
     server.socketAuthUserIdMap = new Map([['socket-1', 42]])
     server.userInfoMap = new Map([['auth:42', { name: 'alice-login', description: '' }]])
@@ -1740,7 +1784,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer({ getStorage: () => storage } as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms', 'GET')
+    const handler = routeHandler('/api/studio/group-chat/rooms', 'GET')
     const ctx: any = {
       state: { user: { id: 2, username: 'ops', role: 'admin', profiles: ['default', 'research'] } },
       status: 200,
@@ -1761,7 +1805,7 @@ describe('Group Chat member/agent identity sync', () => {
     }
     setGroupChatServer({ getStorage: () => storage } as any)
 
-    const handler = routeHandler('/api/hermes/group-chat/rooms', 'GET')
+    const handler = routeHandler('/api/studio/group-chat/rooms', 'GET')
     const ctx: any = {
       state: { user: { id: 1, username: 'admin', role: 'super_admin' } },
       status: 200,
@@ -1775,7 +1819,8 @@ describe('Group Chat member/agent identity sync', () => {
   })
 
   it('routes trusted @mentions and always checks persisted public messages', async () => {
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
+    server.notifiedGroupMessages = new Set<string>()
     const emit = vi.fn()
     server.rooms = new Map([
       ['room-1', {
@@ -1874,7 +1919,7 @@ describe('Group Chat member/agent identity sync', () => {
     // Reproduces hermes-agent #54774 / hermes-studio per-room member name bug:
     // switching rooms should not overwrite a member's per-room display name.
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-1', 'auth:42']])
     server.socketRequestedSourceMap = new Map([['socket-1', 'human']])
@@ -1884,6 +1929,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: '郑工', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Family Room', inviteCode: 'secret' })),
       getRoomAgentByAgentId: vi.fn(() => null),
@@ -1927,7 +1973,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('uses requestedName on first join when no existing member record exists', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-1', 'auth:42']])
     server.socketRequestedSourceMap = new Map([['socket-1', 'human']])
@@ -1935,6 +1981,7 @@ describe('Group Chat member/agent identity sync', () => {
     server.userInfoMap = new Map([['auth:42', { name: 'default-name', description: '' }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-2', name: 'Work Room', inviteCode: 'work123' })),
       getRoomAgentByAgentId: vi.fn(() => null),
@@ -1975,7 +2022,7 @@ describe('Group Chat member/agent identity sync', () => {
 
   it('preserves per-room member description on rejoin when global userInfoMap has stale description', () => {
     const emit = vi.fn()
-    const server = Object.create(GroupChatServer.prototype) as any
+    const server = createServerStub()
     server.rooms = new Map()
     server.socketUserMap = new Map([['socket-1', 'auth:42']])
     server.socketRequestedSourceMap = new Map([['socket-1', 'human']])
@@ -1986,6 +2033,7 @@ describe('Group Chat member/agent identity sync', () => {
     }]])
     server.typingState = new Map()
     server.contextStatusState = new Map()
+    server.roomSummaryService = createRoomSummaryServiceMock()
     server.storage = {
       getRoom: vi.fn(() => ({ id: 'room-1', name: 'Room' })),
       getRoomAgentByAgentId: vi.fn(() => null),

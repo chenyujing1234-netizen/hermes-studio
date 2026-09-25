@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+
+enableAutoUnmount(afterEach)
 
 const routerReplace = vi.hoisted(() => vi.fn())
 const routeState = vi.hoisted(() => ({
@@ -12,6 +14,9 @@ const modelsStore = vi.hoisted(() => ({
   providers: [] as unknown[],
   fetchProviders: vi.fn(async () => {}),
   refreshModelCache: vi.fn(async () => {}),
+}))
+const appStore = vi.hoisted(() => ({
+  reloadModels: vi.fn(async () => {}),
 }))
 const profilesStore = vi.hoisted(() => ({
   activeProfileName: 'default',
@@ -43,6 +48,7 @@ vi.mock('naive-ui', async () => {
         return () => h('button', { onClick: () => emit('click') }, slots.default?.())
       },
     }),
+    NSelect: defineComponent({ name: 'NSelect', props: ['value', 'options'], emits: ['update:value'], setup: () => () => h('select') }),
     NSpin: defineComponent({
       name: 'NSpin',
       setup(_props, { slots }) {
@@ -69,15 +75,24 @@ vi.mock('naive-ui', async () => {
 })
 
 vi.mock('@/stores/hermes/models', () => ({ useModelsStore: () => modelsStore }))
+vi.mock('@/stores/hermes/app', () => ({ useAppStore: () => appStore }))
 vi.mock('@/stores/hermes/profiles', () => ({ useProfilesStore: () => profilesStore }))
 vi.mock('@/stores/hermes/settings', () => ({ useSettingsStore: () => settingsStore }))
 vi.mock('@/api/hermes/copilot-auth', () => ({ checkCopilotToken: vi.fn(async () => {}) }))
+vi.mock('@/api/hermes/profiles', () => ({ fetchProfiles: vi.fn(async () => [{ name: 'default' }, { name: 'work' }, { name: 'research' }]) }))
 vi.mock('@/api/client', () => ({ isStoredSuperAdmin: () => false }))
 
 vi.mock('@/components/hermes/models/AuxiliaryModelsPanel.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('@/components/hermes/models/CombinationModelsPanel.vue', () => ({ default: { template: '<div />' } }))
+vi.mock('@/components/hermes/models/JevSettingsPanel.vue', () => ({ default: { props: ['profile'], template: '<div class="jev-settings-stub" :data-profile="profile" />' } }))
 vi.mock('@/components/hermes/models/ProvidersPanel.vue', () => ({ default: { template: '<div />' } }))
-vi.mock('@/components/hermes/models/ProviderFormModal.vue', () => ({ default: { template: '<div />' } }))
+vi.mock('@/components/hermes/models/ProviderFormModal.vue', () => ({
+  default: {
+    name: 'ProviderFormModal',
+    emits: ['close', 'saved'],
+    template: '<div />',
+  },
+}))
 vi.mock('@/components/hermes/settings/VoiceSettings.vue', () => ({
   default: {
     props: ['kind'],
@@ -130,6 +145,19 @@ describe('Models voice settings tabs', () => {
 
     expect(wrapper.findComponent({ name: 'NTabs' }).props('value')).toBe('general')
     expect(routerReplace).toHaveBeenCalledWith({ query: {} })
+  })
+
+  it('refreshes the global model picker after an OAuth provider is saved', async () => {
+    routeState.query = { addProvider: '1' }
+    const wrapper = mount(ModelsView)
+    await flushPromises()
+    vi.clearAllMocks()
+
+    wrapper.getComponent({ name: 'ProviderFormModal' }).vm.$emit('saved')
+    await flushPromises()
+
+    expect(modelsStore.fetchProviders).toHaveBeenCalledOnce()
+    expect(appStore.reloadModels).toHaveBeenCalledWith({ preserveSelection: true })
   })
 
   it('keeps fallback settings in Auxiliary Models and redirects the old tab link', async () => {

@@ -7,23 +7,48 @@ describe('App connections store', () => {
     vi.resetModules()
     const { DatabaseSync } = await import('node:sqlite')
     db = new DatabaseSync(':memory:')
-    vi.doMock('../../packages/server/src/db/index', () => ({
+    vi.doMock('../../packages/server/src/modules/studio/infrastructure/database/index', () => ({
       getDb: () => db,
       getStoragePath: () => ':memory:',
     }))
-    const { initAllHermesTables } = await import('../../packages/server/src/db/hermes/schemas')
+    const { initAllHermesTables } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
     initAllHermesTables()
   })
 
   afterEach(() => {
     db?.close()
     db = null
-    vi.doUnmock('../../packages/server/src/db/index')
+    vi.doUnmock('../../packages/server/src/modules/studio/infrastructure/database/index')
     vi.resetModules()
   })
 
+  it('defaults legacy and new devices to enabled and preserves a toggle across token renewal', async () => {
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
+    const input = { deviceCode: 'phone-push', deviceName: 'Phone', deviceBrand: '', deviceModel: '',
+      connectionType: 'lan' as const, userId: 7, token: 'token-a', tokenExpiresAt: 5000, now: 1000 }
+    const first = store.upsertAppConnection(input)
+    expect(first.push_enabled).toBe(1)
+    db.exec('ALTER TABLE app_connections DROP COLUMN push_enabled')
+    const { initAllHermesTables } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
+    initAllHermesTables()
+    expect(store.listAppConnections()[0].push_enabled).toBe(1)
+    store.updateAppConnectionPushEnabled(first.id, false)
+    expect(store.isAppConnectionPushEnabled('token-a')).toBe(false)
+    const renewed = store.upsertAppConnection({ ...input, token: 'token-b' })
+    expect(renewed.id).toBe(first.id); expect(renewed.push_enabled).toBe(0)
+    expect(store.isAppConnectionPushEnabled('token-b')).toBe(false)
+    expect(store.isAppConnectionPushEnabled('browser-jwt')).toBe(true)
+    const other = store.upsertAppConnection({ ...input, deviceCode: 'other', token: 'other-token' })
+    expect(other.push_enabled).toBe(1)
+    expect(store.isAppConnectionPushEnabled('other-token')).toBe(true)
+    store.updateAppConnectionPushEnabled(first.id, true)
+    expect(store.isAppConnectionPushEnabled('token-b')).toBe(true)
+    store.revokeAppConnection(first.id)
+    expect(store.updateAppConnectionPushEnabled(first.id, true)).toBeNull()
+  })
+
   it('stores only a hash of each five-minute authorization code and consumes it once', async () => {
-    const store = await import('../../packages/server/src/db/hermes/app-connections-store')
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
     const issued = store.createAppAuthorizationCode(42, 1_000)
     const row = db.prepare('SELECT * FROM app_authorization_codes WHERE id = ?')
       .get(issued.record.id) as any
@@ -41,7 +66,7 @@ describe('App connections store', () => {
   })
 
   it('rejects expired authorization codes', async () => {
-    const store = await import('../../packages/server/src/db/hermes/app-connections-store')
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
     const issued = store.createAppAuthorizationCode(7, 2_000)
 
     expect(() => store.consumeAppAuthorizationCode(issued.authorizationCode, 'phone-001', 2_301))
@@ -61,7 +86,7 @@ describe('App connections store', () => {
       ) VALUES ('legacy-phone', 'Legacy Phone', '', '', 'cloud', 7, 'hash', 5000, 3000, NULL, 1, 3000, 3000)
     `).run()
 
-    const { initAllHermesTables } = await import('../../packages/server/src/db/hermes/schemas')
+    const { initAllHermesTables } = await import('../../packages/server/src/modules/studio/infrastructure/database/schemas')
     initAllHermesTables()
 
     const columns = db.prepare('PRAGMA table_info(app_connections)').all() as Array<{ name: string }>
@@ -74,7 +99,7 @@ describe('App connections store', () => {
   })
 
   it('deduplicates by phone, connection type, and cloud account while validating each token', async () => {
-    const store = await import('../../packages/server/src/db/hermes/app-connections-store')
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
     const first = store.upsertAppConnection({
       deviceCode: 'phone-001',
       deviceName: 'Alice iPhone',
@@ -148,7 +173,7 @@ describe('App connections store', () => {
   })
 
   it('hides revoked connections while retaining the tombstone for an offline App reconnect', async () => {
-    const store = await import('../../packages/server/src/db/hermes/app-connections-store')
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
     const connection = store.upsertAppConnection({
       deviceCode: 'phone-offline',
       deviceName: 'Offline Phone',
@@ -173,7 +198,7 @@ describe('App connections store', () => {
   })
 
   it('queues an exact cloud-account revoke but never guesses an account for a legacy row', async () => {
-    const store = await import('../../packages/server/src/db/hermes/app-connections-store')
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
     const exact = store.upsertAppConnection({
       deviceCode: 'shared-phone',
       deviceName: 'Shared Phone',
@@ -206,7 +231,7 @@ describe('App connections store', () => {
   })
 
   it('assigns a legacy row only when the relay provides one exact cloud account', async () => {
-    const store = await import('../../packages/server/src/db/hermes/app-connections-store')
+    const store = await import('../../packages/server/src/modules/studio/repositories/app-connections-store')
     const legacy = store.upsertAppConnection({
       deviceCode: 'legacy-phone',
       deviceName: 'Legacy Phone',
